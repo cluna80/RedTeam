@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+deploy_*.sh
+patch_*.sh
+install_*.sh
+agents/findings/
