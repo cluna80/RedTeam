@@ -33,10 +33,11 @@ _AGENT_SCRIPTS = {
     3: "agent3_gossip.py",
     4: "agent4_sybil.py",
     5: "agent5_invariant.py",
+    7: "agent7_consensus.py",
     6: "agent6_patch.py",
 }
 
-_DEFAULT_ORDER = [5, 2, 3, 1, 4]   # 6 runs separately via --propose-patches
+_DEFAULT_ORDER = [5, 7, 2, 3, 1, 4]   # 6 runs separately via --propose-patches
 
 
 def _run_agent(
