@@ -1,0 +1,38 @@
+# agents/config/devnet4.toml
+# 4-node devnet: Alice / Bob / Carol / Dave
+
+[nodes]
+rpc_urls = [
+    "http://127.0.0.1:26657",   # Alice
+    "http://127.0.0.1:26659",   # Bob
+    "http://127.0.0.1:26661",   # Carol
+    "http://127.0.0.1:26663",   # Dave
+]
+api_urls = [
+    "http://127.0.0.1:1317",
+    "http://127.0.0.1:1318",
+    "http://127.0.0.1:1319",
+    "http://127.0.0.1:1320",
+]
+
+[scheduler]
+url = "http://127.0.0.1:8080"
+
+[identity]
+url = "http://127.0.0.1:9090"
+
+[accounts]
+alice   = "qcb1alice000000000000000000000000000000000"
+bob     = "qcb1bob00000000000000000000000000000000000"
+carol   = "qcb1carol0000000000000000000000000000000000"
+dave    = "qcb1dave0000000000000000000000000000000000"
+faucet  = "qcb1faucet000000000000000000000000000000000"
+
+[timing]
+poll_interval_secs      = 5
+finding_flush_interval  = 30
+gossip_replay_window    = 120
+
+[limits]
+max_flood_msgs          = 500
+max_sybil_identities    = 20
