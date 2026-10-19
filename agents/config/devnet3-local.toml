@@ -1,0 +1,32 @@
+# devnet3-local.toml — 3-node local devnet (Alice/Bob/Dave)
+#
+# chain-forge-node serves its REST API on --api-port (8080/8081/8082).
+# There is no separate Tendermint-style RPC port; both devnet_guard's
+# chain_id check and all tx/query calls use the same api_urls below.
+#
+# Start the devnet with:
+#   bash /home/claude/chain-forge-engine/scripts/start-devnet-local.sh
+# Verify:
+#   curl http://127.0.0.1:8080/api/status | python3 -m json.tool
+
+[nodes]
+# api_urls — used by devnet_guard /api/status check and all agents
+api_urls = [
+  "http://127.0.0.1:8080",   # Alice
+  "http://127.0.0.1:8081",   # Bob
+  "http://127.0.0.1:8082",   # Dave
+]
+# rpc_urls — set to api_urls (no separate RPC port in chain-forge-node)
+rpc_urls = [
+  "http://127.0.0.1:8080",
+  "http://127.0.0.1:8081",
+  "http://127.0.0.1:8082",
+]
+
+[scheduler]
+# No standalone scheduler; Alice's node handles tx ordering
+url = "http://127.0.0.1:8080"
+
+[identity]
+# Identity pilot endpoint on Alice (all nodes share genesis state)
+url = "http://127.0.0.1:8080"
