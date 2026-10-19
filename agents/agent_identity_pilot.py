@@ -51,6 +51,9 @@ from agents.identity_client import (
     rejected,
     tx_id_from_response,
     fetch_tx_result,
+    transfer,
+    register_identity,
+    _fetch_chain_nonce,
 )
 
 # Well-known funded genesis addresses
@@ -165,49 +168,108 @@ def attack_ip1_self_attest(client: httpx.Client, cfg: dict[str, Any]) -> list[Fi
 
 def attack_ip2_duplicate_attest(client: httpx.Client, cfg: dict[str, Any]) -> list[FindingRecord]:
     """
-    Same (attester_controller, subject_controller) pair attests twice in one epoch.
-    Second tx MUST be rejected (INV-11).
+    IP-2: Duplicate active attestation — same (attester, claimant) pair attests twice.
+    The second Attest tx MUST fail at execution with AlreadyAttested.
+
+    Prior version used unregistered ctrl-* addresses; both attests failed before
+    reaching the dedup guard (root cause: fake addresses have no on-chain identity).
+
+    Rewrite:
+      - Fund a fresh address from Alice (sequential, confirmed before proceeding).
+      - Register it as a Provisional identity on-chain.
+      - Alice (Verified genesis identity) submits two Attest txs for the same claimant.
+      - Verdict is based on tx execution result (GET /api/tx/{id}), not HTTP status.
     """
     findings: list[FindingRecord] = []
     api = _api(cfg)
-    subject_ctrl  = f"ctrl-subject-{uuid.uuid4().hex[:8]}"
-    attester_ctrl = f"ctrl-attester-{uuid.uuid4().hex[:8]}"
-    entity_id     = f"entity-dup-{uuid.uuid4().hex[:8]}"
 
-    s1, b1 = attest_entity(
-        client, api,
-        entity_id=entity_id,
-        subject_controller=subject_ctrl,
-        attester_controller=attester_ctrl,
+    # --- Step 1: fund a fresh Provisional claimant from Alice ---
+    claimant = f"qcb1ip2{uuid.uuid4().hex[:12]}"
+    alice_nonce = _fetch_chain_nonce(api, _ALICE) or 0
+    s_fund, b_fund = transfer(
+        client, api, sender=_ALICE, to=claimant, amount=200_000, nonce=alice_nonce,
     )
-    log.info("[IP-2] first attest", status=s1)
+    fund_tid = tx_id_from_response(b_fund)
+    log.info("[IP-2] funding fresh claimant", addr=claimant, tx_id=fund_tid, status=s_fund)
     _wait_confirm()
 
+    # Verify funding landed before registering
+    _, fund_exec = fetch_tx_result(client, api, fund_tid) if fund_tid else (0, {})
+    if not fund_exec.get("success"):
+        log.info("[IP-2] funding did not land — skipping test", error=fund_exec.get("error"))
+        return findings
+
+    # --- Step 2: register claimant as Provisional ---
+    s_reg, b_reg = register_identity(client, api, sender=claimant, nonce=0)
+    reg_tid = tx_id_from_response(b_reg)
+    log.info("[IP-2] registering claimant", tx_id=reg_tid, status=s_reg)
+    _wait_confirm()
+
+    _, reg_exec = fetch_tx_result(client, api, reg_tid) if reg_tid else (0, {})
+    if not reg_exec.get("success"):
+        log.info("[IP-2] registration did not land — skipping test", error=reg_exec.get("error"))
+        return findings
+
+    # --- Step 3: Alice attests the claimant (first, must succeed) ---
+    s1, b1 = attest_entity(
+        client, api,
+        entity_id=claimant,
+        subject_controller=claimant,
+        attester_controller=_ALICE,
+    )
+    att1_tid = tx_id_from_response(b1)
+    log.info("[IP-2] first attest", tx_id=att1_tid, status=s1)
+    _wait_confirm()
+
+    _, exec1 = fetch_tx_result(client, api, att1_tid) if att1_tid else (0, {})
+    if not exec1.get("success"):
+        log.info(
+            "[IP-2] first attest failed at execution — cannot proceed",
+            error=exec1.get("error"), tx_id=att1_tid,
+        )
+        return findings
+
+    log.info("[IP-2] first attest confirmed at execution ✓")
+
+    # --- Step 4: Alice attests same claimant again (must fail with AlreadyAttested) ---
     s2, b2 = attest_entity(
         client, api,
-        entity_id=entity_id,
-        subject_controller=subject_ctrl,
-        attester_controller=attester_ctrl,
+        entity_id=claimant,
+        subject_controller=claimant,
+        attester_controller=_ALICE,
     )
-    log.info("[IP-2] duplicate attest", status=s2)
+    att2_tid = tx_id_from_response(b2)
+    log.info("[IP-2] duplicate attest submitted", tx_id=att2_tid, status=s2)
+    _wait_confirm()
 
-    if not rejected(s2, b2):
+    _, exec2 = fetch_tx_result(client, api, att2_tid) if att2_tid else (0, {})
+    exec2_ok = exec2.get("success")
+    exec2_err = exec2.get("error", "")
+
+    if exec2_ok is True:
+        # Dedup guard did not fire — security finding
         findings.append(_finding(
             inv=11,
-            title="Duplicate AttestEntity accepted for same (attester, subject) pair",
+            title="Duplicate active attestation accepted at execution (AlreadyAttested guard missing)",
             severity=Severity.HIGH,
             steps=[
-                f"AttestEntity entity_id={entity_id} — first (accepted)",
-                f"AttestEntity entity_id={entity_id} — second (same pair, same epoch)",
-                f"Second response: status={s2}",
+                f"Transfer 200_000 uqcb → {claimant} (funded)",
+                f"RegisterIdentity sender={claimant} (Provisional)",
+                f"Attest claimant={claimant} attester={_ALICE} — first (tx {att1_tid}) ✓",
+                f"Attest claimant={claimant} attester={_ALICE} — duplicate (tx {att2_tid})",
+                f"GET /api/tx/{att2_tid} → success=true (expected success=false + AlreadyAttested)",
             ],
-            expected="Second attestation from same pair rejected per-epoch dedup (INV-11)",
-            actual=f"Second attestation accepted status={s2}",
-            evidence={"entity_id": entity_id, "resp1": b1, "resp2": b2},
+            expected="Execution fails with AlreadyAttested — same active attester cannot attest twice",
+            actual=f"Execution succeeded: success=true, tx={att2_tid}",
+            evidence={"claimant": claimant, "att1_tid": att1_tid, "att2_tid": att2_tid,
+                      "exec1": exec1, "exec2": exec2},
         ))
         log.finding(findings[-1])
     else:
-        log.info("[IP-2] duplicate attest correctly rejected ✓", status=s2)
+        log.info(
+            "[IP-2] duplicate attest correctly rejected at execution ✓",
+            error=exec2_err, tx_id=att2_tid,
+        )
 
     return findings
 
