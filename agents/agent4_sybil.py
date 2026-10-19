@@ -130,41 +130,55 @@ def _register_and_wait(
 def attack_s1_double_register(client: httpx.Client, cfg: dict[str, Any]) -> list[FindingRecord]:
     """
     An address that is already registered sends RegisterIdentity again.
-    The chain must reject the duplicate or it is a no-op.
+    The chain must reject the duplicate at execution (AlreadyExists).
+
+    Uses Bob — a funded genesis account that is already registered — so gas
+    is available and the uniqueness check is actually reached.  Verifies
+    rejection via GET /api/tx/{id}; HTTP 200/queued at mempool is expected
+    and does not mean the tx succeeded at execution.
     """
     findings: list[FindingRecord] = []
     api_url = _api(cfg)
-    addr = _fresh_addr()
 
-    s1, b1 = _register_and_wait(client, api_url, addr)
-    log.info("[S1] first registration", addr=addr, status=s1, body=b1)
+    # Bob is already registered (genesis).  Re-register him.
+    s2, b2 = ic.register_identity(client, api_url, sender=_BOB)
+    tx_id = ic.tx_id_from_response(b2)
+    log.info("[S1] second registration for already-registered Bob",
+             status=s2, tx_id=tx_id)
 
-    s2, b2 = ic.register_identity(client, api_url, sender=addr)
-    log.info("[S1] second registration (same address)", status=s2, body=b2)
+    time.sleep(_TX_WAIT_SECS)
 
-    if not ic.rejected(s2, b2):
-        time.sleep(_TX_WAIT_SECS)
-        # Check identity state — if both registered we have a duplicate
-        _, id_state = ic.get_entity_status(client, api_url, addr)
-        log.info("[S1] identity state after double-register", state=id_state)
-        # The key invariant: we just note that the second tx was accepted
-        # (possibly a no-op; the real check is whether it created duplicate entries)
+    exec_ok: bool | None = None
+    exec_body: dict = {}
+    if tx_id:
+        _, exec_body = ic.fetch_tx_result(client, api_url, tx_id)
+        exec_ok = exec_body.get("success", None)
+
+    log.info("[S1] double-register execution result", success=exec_ok,
+             error=exec_body.get("error"))
+
+    if ic.rejected(s2, b2):
+        log.info("[S1] double-registration rejected at HTTP layer ✓")
+    elif exec_ok is True:
+        _, id_state = ic.get_entity_status(client, api_url, _BOB)
         f = _finding(
             inv=7,
-            title="Double-registration not rejected at HTTP layer",
-            severity=Severity.MEDIUM,
+            title="Double-registration succeeded at execution (INV-7/S1)",
+            severity=Severity.HIGH,
             steps=[
-                f"POST /api/tx RegisterIdentity sender={addr} → accepted (s={s1})",
-                f"POST /api/tx RegisterIdentity sender={addr} again → s={s2}, not rejected",
+                f"Bob ({_BOB}) is already registered (genesis)",
+                f"POST /api/tx RegisterIdentity sender={_BOB} again",
+                f"Execution result: success={exec_ok}",
             ],
-            expected="Second RegisterIdentity rejected (409 or similar) or queued as a known no-op",
-            actual=f"Second tx returned status={s2}, body={b2}",
-            evidence={"addr": addr, "reg1": b1, "reg2": b2, "id_state": id_state},
+            expected="Second RegisterIdentity rejected at execution (AlreadyExists)",
+            actual=f"Second registration executed successfully: {exec_body}",
+            evidence={"addr": _BOB, "exec": exec_body, "id_state": id_state},
         )
         findings.append(f)
         log.finding(f)
     else:
-        log.info("[S1] second registration correctly rejected ✓", status=s2)
+        log.info("[S1] double-registration correctly rejected at execution ✓",
+                 error=exec_body.get("error"))
 
     return findings
 
@@ -177,41 +191,113 @@ EPOCH_REG_CAP = 10   # assumed; the real cap comes from genesis chain config
 
 def attack_s2_registry_spam(client: httpx.Client, cfg: dict[str, Any]) -> list[FindingRecord]:
     """
-    Flood EPOCH_REG_CAP+10 RegisterIdentity txs with different addresses.
-    If the chain imposes a per-epoch cap, the excess must be rejected.
+    Flood EPOCH_REG_CAP+1 funded RegisterIdentity txs.
+
+    Protocol:
+      1. Fund EPOCH_REG_CAP+1 fresh addresses from Alice (200_000 uqcb each —
+         enough for gas).  Wait for the transfers to land.
+      2. Register each funded address; collect tx_ids.
+      3. Wait for all registrations to land, then count how many executed
+         successfully.  If more than EPOCH_REG_CAP succeed it is a finding.
+
+    Checks execution results via GET /api/tx/{id}, not just mempool queuing.
+    All txs should reach mempool (they are syntactically valid); the cap is
+    enforced at execution time (inside IdentityStore::register).
     """
     findings: list[FindingRecord] = []
     api_url = _api(cfg)
-    spam_count = EPOCH_REG_CAP + 10
-    accepted = 0
+    spam_count = EPOCH_REG_CAP + 1   # one over the cap
 
-    log.info(f"[S2] spamming {spam_count} RegisterIdentity txs…")
-    for _ in range(spam_count):
+    # Step 1: fund fresh addresses from Alice one at a time.
+    # The chain uses a strictly sequential nonce model: only one tx per sender
+    # can execute per block (nonce must match exactly).  We must wait for each
+    # transfer to land before submitting the next one.
+    addrs: list[str] = []
+    log.info(f"[S2] funding {spam_count} fresh addresses from Alice (sequential)…")
+    funded_ok = 0
+    for i in range(spam_count):
         addr = _fresh_addr()
-        s, b = ic.register_identity(client, api_url, sender=addr)
-        if ic.queued(s, b):
-            accepted += 1
+        addrs.append(addr)
 
-    log.info("[S2] spam complete", accepted=accepted, cap=EPOCH_REG_CAP)
+        # Fetch authoritative nonce from chain before each transfer
+        alice_nonce = ic._fetch_chain_nonce(api_url, _ALICE) or 0
+        s, b = ic.transfer(client, api_url, sender=_ALICE, to=addr, amount=200_000,
+                           nonce=alice_nonce)
+        tid = ic.tx_id_from_response(b)
+        log.info(f"[S2] transfer {i+1}/{spam_count}", addr=addr, status=s,
+                 nonce=alice_nonce, tx_id=tid)
 
-    if accepted > EPOCH_REG_CAP:
+        # Wait for this transfer to land before sending the next
+        time.sleep(_TX_WAIT_SECS)
+
+        # Verify it landed
+        bal = 0
+        try:
+            r = client.get(f"{api_url}/api/accounts/{addr}", timeout=5.0)
+            bal = r.json().get("balances", {}).get("uqcb", 0) if r.status_code == 200 else 0
+        except Exception:
+            pass
+        if bal >= 100_000:
+            funded_ok += 1
+        else:
+            log.info(f"[S2] transfer {i+1} did not land",
+                     addr=addr, balance=bal, tx_id=tid,
+                     exec=ic.fetch_tx_result(client, api_url, tid)[1] if tid else {})
+
+    if funded_ok < spam_count:
+        log.info(f"[S2] {funded_ok}/{spam_count} funded — proceeding with what landed")
+
+    log.info(f"[S2] funding complete", funded_ok=funded_ok, total=spam_count)
+
+    # Step 2: register all funded addresses.
+    # Each fresh address has nonce=0 (never used before).
+    reg_tx_ids: list[tuple[str, str]] = []   # (addr, tx_id)
+    log.info(f"[S2] registering {spam_count} addresses…")
+    for addr in addrs:
+        s, b = ic.register_identity(client, api_url, sender=addr, nonce=0)
+        tid = ic.tx_id_from_response(b)
+        if tid:
+            reg_tx_ids.append((addr, tid))
+
+    time.sleep(_TX_WAIT_SECS)
+
+    # Step 3: count successful executions
+    succeeded = 0
+    failed = 0
+    errors: list[str] = []
+    for addr, tid in reg_tx_ids:
+        _, result = ic.fetch_tx_result(client, api_url, tid)
+        if result.get("success"):
+            succeeded += 1
+        else:
+            failed += 1
+            err = result.get("error", "unknown")
+            if err not in errors:
+                errors.append(err)
+
+    log.info("[S2] registration results",
+             succeeded=succeeded, failed=failed,
+             cap=EPOCH_REG_CAP, errors=errors)
+
+    if succeeded > EPOCH_REG_CAP:
         f = _finding(
             inv=8,
             title="Identity registry accepted more registrations than epoch cap",
             severity=Severity.HIGH,
             steps=[
-                f"Submit {spam_count} RegisterIdentity txs with distinct addresses",
-                f"{accepted} were queued (cap={EPOCH_REG_CAP})",
+                f"Fund {spam_count} fresh addresses from Alice",
+                f"Submit {spam_count} RegisterIdentity txs",
+                f"{succeeded} executed successfully (cap={EPOCH_REG_CAP})",
             ],
-            expected=f"At most {EPOCH_REG_CAP} registrations queued per epoch",
-            actual=f"{accepted} accepted (excess={accepted - EPOCH_REG_CAP})",
-            evidence={"accepted": accepted, "cap": EPOCH_REG_CAP, "submitted": spam_count},
+            expected=f"At most {EPOCH_REG_CAP} registrations succeed per epoch",
+            actual=f"{succeeded} succeeded (excess={succeeded - EPOCH_REG_CAP})",
+            evidence={"succeeded": succeeded, "failed": failed,
+                      "cap": EPOCH_REG_CAP, "submitted": spam_count, "errors": errors},
         )
         findings.append(f)
         log.finding(f)
     else:
-        log.info("[S2] epoch cap enforced ✓ (or cap not implemented — needs genesis check)",
-                 accepted=accepted, cap=EPOCH_REG_CAP)
+        log.info("[S2] epoch cap enforced ✓", succeeded=succeeded, cap=EPOCH_REG_CAP)
 
     # Sanity: node still alive
     s_alive, _ = _get(client, f"{api_url}/api/status")

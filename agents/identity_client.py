@@ -45,6 +45,7 @@ TX_CONFIRM_SYBIL           = "ConfirmSybil"         # Phase C: TxBody::ConfirmSy
 TX_REPORT_SUSPECTED_SYBIL  = "ReportSuspectedSybil" # Phase D: TxBody::ReportSuspectedSybil { suspected_id }
 TX_REVERSE_SYBIL           = "ReverseSybil"         # Phase D: TxBody::ReverseSybil { sybil_id }
 TX_REGISTER_IDENTITY       = "RegisterIdentity"     # Phase 0: TxBody::RegisterIdentity (no fields)
+TX_TRANSFER                = "Transfer"             # Coin transfer: {to, denom, amount}
 
 # Default gas limit for identity-pilot transactions.
 _DEFAULT_GAS = 50_000
@@ -203,6 +204,31 @@ def tx_execution_succeeded(
     if status == 404 or body.get("error") == "not found":
         return None
     return bool(body.get("success", False))
+
+
+# ---------------------------------------------------------------------------
+# Coin transfer
+# ---------------------------------------------------------------------------
+
+def transfer(
+    client: httpx.Client,
+    api_url: str,
+    *,
+    sender: str,
+    to: str,
+    amount: int,
+    denom: str = "uqcb",
+    nonce: int | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """
+    Submit a Transfer tx to send coins from sender to to.
+    Used by S2 to fund fresh test addresses before registering them.
+    """
+    return _post_tx(
+        client, api_url, sender,
+        TX_TRANSFER, {"to": to, "denom": denom, "amount": amount},
+        nonce=nonce,
+    )
 
 
 # ---------------------------------------------------------------------------
