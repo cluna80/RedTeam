@@ -325,61 +325,112 @@ REVOKE_COOLDOWN_SECS = 3   # assumed minimum; check chain config
 
 def attack_s3_revoke_reattest(client: httpx.Client, cfg: dict[str, Any]) -> list[FindingRecord]:
     """
-    Alice attests Bob, revokes, then immediately re-attests.
-    If a cooldown is enforced, the immediate re-attest must be rejected.
+    Alice attests a fresh Provisional identity, revokes, then immediately
+    re-attests the same identity.  The chain must reject the re-attest at
+    execution with a RevocationCooldown error.
+
+    Why a fresh address (not Bob):
+      Bob is already Verified (genesis) — attest() hits AlreadyVerified
+      before the cooldown path.  A Provisional address lets the test reach
+      the cooldown guard in IdentityStore::attest().
+
+    The fresh address is first funded by Alice and then registered as
+    Provisional before the attest/revoke cycle begins.
     """
     findings: list[FindingRecord] = []
     api_url = _api(cfg)
 
-    # Ensure Bob is registered
-    ic.register_identity(client, api_url, sender=_BOB)
+    # Fund a fresh address, register it as Provisional
+    target = _fresh_addr()
+    alice_nonce = ic._fetch_chain_nonce(api_url, _ALICE) or 0
+    s_fund, b_fund = ic.transfer(client, api_url, sender=_ALICE, to=target,
+                                 amount=200_000, nonce=alice_nonce)
+    log.info("[S3] fund target", addr=target, status=s_fund)
     time.sleep(_TX_WAIT_SECS)
 
-    # Alice attests Bob
+    s_reg, b_reg = ic.register_identity(client, api_url, sender=target, nonce=0)
+    log.info("[S3] register target", addr=target, status=s_reg, body=b_reg)
+    time.sleep(_TX_WAIT_SECS)
+
+    # Alice attests the fresh Provisional identity
     s_att, b_att = ic.attest_entity(
         client, api_url,
-        entity_id=_BOB,
-        subject_controller=_BOB,
+        entity_id=target,
+        subject_controller=target,
         attester_controller=_ALICE,
     )
+    att_tid = ic.tx_id_from_response(b_att)
     log.info("[S3] initial attest", status=s_att, body=b_att)
     time.sleep(_TX_WAIT_SECS)
 
-    # Alice revokes Bob
+    # Verify attest executed (not just queued)
+    _, att_exec = ic.fetch_tx_result(client, api_url, att_tid) if att_tid else (0, {})
+    if not att_exec.get("success"):
+        log.info("[S3] initial attest failed at execution — cannot proceed",
+                 error=att_exec.get("error"))
+        return findings
+
+    # Alice revokes the attestation
     s_rev, b_rev = ic.revoke_attestation(
         client, api_url,
-        entity_id=_BOB,
+        entity_id=target,
         revoker_controller=_ALICE,
     )
-    log.info("[S3] revocation", status=s_rev, body=b_rev)
+    rev_tid = ic.tx_id_from_response(b_rev)
+    log.info("[S3] revocation submitted", status=s_rev, body=b_rev)
+    time.sleep(_TX_WAIT_SECS)
 
-    # Immediately re-attest (should be blocked by cooldown if enforced)
+    _, rev_exec = ic.fetch_tx_result(client, api_url, rev_tid) if rev_tid else (0, {})
+    if not rev_exec.get("success"):
+        log.info("[S3] revocation failed at execution — cannot proceed",
+                 error=rev_exec.get("error"))
+        return findings
+
+    # Immediately re-attest (same epoch — should be blocked by RevocationCooldown)
     s_re, b_re = ic.attest_entity(
         client, api_url,
-        entity_id=_BOB,
-        subject_controller=_BOB,
+        entity_id=target,
+        subject_controller=target,
         attester_controller=_ALICE,
     )
-    log.info("[S3] immediate re-attest", status=s_re, body=b_re)
+    re_tid = ic.tx_id_from_response(b_re)
+    log.info("[S3] immediate re-attest submitted", status=s_re, body=b_re)
+    time.sleep(_TX_WAIT_SECS)
 
-    if not ic.rejected(s_re, b_re):
+    # Check execution result
+    exec_ok: bool | None = None
+    exec_body: dict = {}
+    if re_tid:
+        _, exec_body = ic.fetch_tx_result(client, api_url, re_tid)
+        exec_ok = exec_body.get("success", None)
+
+    log.info("[S3] re-attest execution result", success=exec_ok,
+             error=exec_body.get("error"))
+
+    if exec_ok is True:
+        # Cooldown not enforced — real finding
         f = _finding(
             inv=None,
             title="Revocation cooldown not enforced: immediate re-attest accepted",
             severity=Severity.MEDIUM,
             steps=[
-                f"Alice attests Bob → s={s_att}",
-                f"Alice revokes Bob → s={s_rev}",
-                f"Alice immediately re-attests Bob → s={s_re} (not rejected)",
+                f"Fund + register fresh Provisional identity {target}",
+                f"Alice attests {target} → exec success",
+                f"Alice revokes → exec success",
+                f"Alice immediately re-attests {target} → exec success (not blocked)",
             ],
-            expected=f"Re-attest blocked by {REVOKE_COOLDOWN_SECS}s cooldown",
-            actual=f"Re-attest accepted: status={s_re}, body={b_re}",
-            evidence={"att": b_att, "rev": b_rev, "re_att": b_re},
+            expected="Re-attest rejected at execution with RevocationCooldown error",
+            actual=f"Re-attest executed successfully: {exec_body}",
+            evidence={"att": b_att, "att_exec": att_exec,
+                      "rev": b_rev, "rev_exec": rev_exec,
+                      "re_att": b_re, "re_exec": exec_body},
         )
         findings.append(f)
         log.finding(f)
     else:
-        log.info("[S3] immediate re-attest correctly rejected ✓", status=s_re)
+        err = exec_body.get("error", "")
+        log.info("[S3] immediate re-attest correctly rejected at execution ✓",
+                 error=err)
 
     return findings
 
