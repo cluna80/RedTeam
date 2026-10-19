@@ -947,6 +947,194 @@ class ExtendedInvariantChecker(InvariantChecker):
         return findings
 
     # -----------------------------------------------------------------------
+    # Identity pilot invariants (INV-11 – INV-15)
+    # -----------------------------------------------------------------------
+
+    def _node_api_get(self, client: httpx.Client, path: str) -> dict | None:
+        """Hit the REST API (port 1317) rather than the RPC port."""
+        for url in self.node_urls:
+            result = _get(client, f"{url}{path}")
+            if result is not None:
+                return result
+        return None
+
+    def check_inv11_no_self_attest(self, client: httpx.Client) -> list[FindingRecord]:
+        """
+        INV-11: No AttestEntity where attester_controller == subject_controller,
+        and no duplicate (attester, subject) pair within the same epoch.
+
+        Polls /api/identity/attestations and looks for violations.
+        """
+        findings: list[FindingRecord] = []
+        data = self._node_api_get(client, "/api/identity/attestations")
+        if data is None:
+            return findings
+
+        # Check for self-attestations
+        for att in data.get("attestations", []):
+            subj    = att.get("subject_controller", "")
+            attester = att.get("attester_controller", "")
+            if subj and attester and subj == attester:
+                findings.append(self._finding(
+                    inv=11,
+                    title="Self-attestation found in attestation log",
+                    severity=Severity.CRITICAL,
+                    steps=[
+                        "Poll /api/identity/attestations",
+                        "Find entry where attester_controller == subject_controller",
+                    ],
+                    expected="No self-attestations (INV-11)",
+                    actual=f"Self-attest from controller={attester}",
+                    evidence={"attestation": att},
+                ))
+
+        # Check for duplicate (attester, subject, epoch) pairs
+        seen: dict[tuple, list] = {}
+        for att in data.get("attestations", []):
+            key = (
+                att.get("attester_controller"),
+                att.get("subject_controller"),
+                att.get("epoch"),
+            )
+            seen.setdefault(key, []).append(att)
+
+        for key, atts in seen.items():
+            if len(atts) > 1:
+                findings.append(self._finding(
+                    inv=11,
+                    title="Duplicate (attester, subject) attestation in same epoch",
+                    severity=Severity.HIGH,
+                    steps=[
+                        "Poll /api/identity/attestations",
+                        f"Group by (attester, subject, epoch) — found {len(atts)} for key={key}",
+                    ],
+                    expected="At most one attestation per (attester, subject) pair per epoch",
+                    actual=f"{len(atts)} attestations for key={key}",
+                    evidence={"key": str(key), "attestations": atts},
+                ))
+
+        return findings
+
+    def check_inv12_revoke_clears_pop(self, client: httpx.Client) -> list[FindingRecord]:
+        """
+        INV-12: After RevokeAttestation confirms, the entity's pop_verified
+        MUST be false.  Polls /api/identity/entities for any revoked-but-verified.
+        """
+        findings: list[FindingRecord] = []
+        data = self._node_api_get(client, "/api/identity/entities")
+        if data is None:
+            return findings
+
+        for entity in data.get("entities", []):
+            revoked      = entity.get("attestation_revoked", False)
+            pop_verified = entity.get("pop_verified", False)
+            if revoked and pop_verified:
+                entity_id = entity.get("entity_id", "<unknown>")
+                findings.append(self._finding(
+                    inv=12,
+                    title="Revoked entity still shows pop_verified=true",
+                    severity=Severity.CRITICAL,
+                    steps=[
+                        "Poll /api/identity/entities",
+                        f"Find entity_id={entity_id} with attestation_revoked=true and pop_verified=true",
+                    ],
+                    expected="pop_verified=false after RevokeAttestation (INV-12)",
+                    actual=f"entity_id={entity_id}: revoked=true, pop_verified=true",
+                    evidence={"entity": entity},
+                ))
+        return findings
+
+    def check_inv13_confirm_sybil_freezes(self, client: httpx.Client) -> list[FindingRecord]:
+        """
+        INV-13: Any entity with sybil_confirmed=true MUST also have frozen=true.
+        Polls /api/identity/entities.
+        """
+        findings: list[FindingRecord] = []
+        data = self._node_api_get(client, "/api/identity/entities")
+        if data is None:
+            return findings
+
+        for entity in data.get("entities", []):
+            sybil_confirmed = entity.get("sybil_confirmed", False)
+            frozen          = entity.get("frozen", False)
+            if sybil_confirmed and not frozen:
+                entity_id = entity.get("entity_id", "<unknown>")
+                findings.append(self._finding(
+                    inv=13,
+                    title="ConfirmSybil entity not frozen",
+                    severity=Severity.CRITICAL,
+                    steps=[
+                        "Poll /api/identity/entities",
+                        f"Find entity_id={entity_id} with sybil_confirmed=true and frozen=false",
+                    ],
+                    expected="sybil_confirmed=true implies frozen=true (INV-13)",
+                    actual=f"entity_id={entity_id}: sybil_confirmed=true, frozen=false",
+                    evidence={"entity": entity},
+                ))
+        return findings
+
+    def check_inv14_report_no_freeze(self, client: httpx.Client) -> list[FindingRecord]:
+        """
+        INV-14: An entity that has only a pending report (sybil_suspected=true)
+        but no ConfirmSybil MUST NOT be frozen.
+        """
+        findings: list[FindingRecord] = []
+        data = self._node_api_get(client, "/api/identity/entities")
+        if data is None:
+            return findings
+
+        for entity in data.get("entities", []):
+            suspected       = entity.get("sybil_suspected", False)
+            sybil_confirmed = entity.get("sybil_confirmed", False)
+            frozen          = entity.get("frozen", False)
+            # Flagged for suspicion but NOT yet confirmed
+            if suspected and not sybil_confirmed and frozen:
+                entity_id = entity.get("entity_id", "<unknown>")
+                findings.append(self._finding(
+                    inv=14,
+                    title="Entity frozen on ReportSuspectedSybil alone (no ConfirmSybil)",
+                    severity=Severity.CRITICAL,
+                    steps=[
+                        "Poll /api/identity/entities",
+                        f"Find entity_id={entity_id}: suspected=true, confirmed=false, frozen=true",
+                    ],
+                    expected="Entity NOT frozen until ConfirmSybil confirms (INV-14)",
+                    actual=f"entity_id={entity_id}: suspected=true, confirmed=false, frozen=true",
+                    evidence={"entity": entity},
+                ))
+        return findings
+
+    def check_inv15_sybil_rate(self, client: httpx.Client) -> list[FindingRecord]:
+        """
+        INV-15: Pilot sybil rate must stay below 3 %.  Reads /api/identity/pilot/stats.
+        """
+        findings: list[FindingRecord] = []
+        data = self._node_api_get(client, "/api/identity/pilot/stats")
+        if data is None:
+            return findings
+
+        sybil_rate = data.get("sybil_rate", None)
+        threshold  = 0.03
+
+        if sybil_rate is not None and sybil_rate >= threshold:
+            findings.append(self._finding(
+                inv=15,
+                title="Identity pilot sybil rate exceeds 3% threshold",
+                severity=Severity.HIGH,
+                steps=[
+                    "Poll /api/identity/pilot/stats",
+                    f"Observe sybil_rate={sybil_rate:.2%} >= {threshold:.0%}",
+                ],
+                expected=f"sybil_rate < {threshold:.0%} (ROADMAP Q1 target, INV-15)",
+                actual=f"sybil_rate={sybil_rate:.2%}",
+                evidence={"stats": data},
+            ))
+        elif sybil_rate is not None:
+            print(f"[monitor] INV-15: sybil_rate={sybil_rate:.2%} ✓ (< {threshold:.0%})",
+                  flush=True)
+        return findings
+
+    # -----------------------------------------------------------------------
     # Extend run_all to include the new checks
     # -----------------------------------------------------------------------
 
@@ -962,6 +1150,12 @@ class ExtendedInvariantChecker(InvariantChecker):
             self.check_validator1_set_continuity,
             self.check_validator2_no_unbonded_signing,
             self.check_validator3_quorum_threshold,
+            # INV-11–15: identity pilot invariants
+            self.check_inv11_no_self_attest,
+            self.check_inv12_revoke_clears_pop,
+            self.check_inv13_confirm_sybil_freezes,
+            self.check_inv14_report_no_freeze,
+            self.check_inv15_sybil_rate,
         ]
         for check in extended_checks:
             try:

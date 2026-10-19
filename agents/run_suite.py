@@ -35,9 +35,10 @@ _AGENT_SCRIPTS = {
     5: "agent5_invariant.py",
     7: "agent7_consensus.py",
     6: "agent6_patch.py",
+    8: "agent_identity_pilot.py",    # Phase A–D attestation-guard / identity pilot
 }
 
-_DEFAULT_ORDER = [5, 7, 2, 3, 1, 4]   # 6 runs separately via --propose-patches
+_DEFAULT_ORDER = [5, 7, 2, 3, 1, 4, 8]   # 6 runs separately via --propose-patches; 8=identity pilot
 
 
 def _run_agent(
@@ -118,6 +119,9 @@ def main() -> None:
             continue
         if agent_num == 6:
             continue   # PatchProposer runs only via --propose-patches
+        if agent_num not in _AGENT_SCRIPTS:
+            print(f"WARNING: Unknown agent {agent_num}, skipping")
+            continue
         rc = _run_agent(agent_num, args.config, args.findings_dir, extra)
         exit_codes[agent_num] = rc
 

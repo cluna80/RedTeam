@@ -105,3 +105,59 @@ MUST be rejected during quorum counting, even if it passed initial gossip
 validation.
 
 **Source**: Change Set S timestamp guard + scheduler quorum gate.
+
+---
+
+## INV-11: AttestEntity requires unique, non-self controller
+
+A Phase-A `AttestEntity` on-chain transaction MUST be rejected if the
+`attester_controller` matches the `subject_controller`.  A controller cannot
+attest its own identity.  Each `(attester, subject)` pair MAY attest at most
+once per epoch; a second submission for the same pair MUST be rejected.
+
+**Source**: Attestation guard Phase A on-chain validation.
+
+---
+
+## INV-12: RevokeAttestation cannot re-verify without fresh Phase A
+
+Once a `RevokeAttestation` tx is confirmed for an `entity_id`, that entity's
+`pop_verified` flag MUST become false.  A subsequent `ConfirmSybil` or reward
+event for that entity MUST be rejected until a new `AttestEntity` tx completes
+the full Phase A cycle again.
+
+**Source**: Attestation guard Phase B + personhood module revocation path.
+
+---
+
+## INV-13: ConfirmSybil freezes entity before any further reward
+
+A `ConfirmSybil` on-chain transaction (Phase C) MUST atomically freeze the
+target entity so that no reward emission, escrow release, or influence event
+can occur for that entity from the moment the tx is included in a block.
+The freeze MUST persist until `ReverseSybil` is confirmed (Phase D reverse
+path).
+
+**Source**: Attestation guard Phase C freeze gate.
+
+---
+
+## INV-14: ReportSuspectedSybil cannot be abused to grief honest nodes
+
+`ReportSuspectedSybil` MUST NOT immediately freeze or penalise the target.
+The target's `pop_verified` status and reward eligibility MUST remain
+unchanged until a `ConfirmSybil` is issued.  An entity MUST NOT be frozen
+solely on the basis of unconfirmed reports.
+
+**Source**: Attestation guard Phase D report handling.
+
+---
+
+## INV-15: Identity pilot sybil rate stays below 3 %
+
+Across all active `pop_verified` entities tracked by the identity pilot, the
+fraction that are subsequently flagged by `ConfirmSybil` MUST remain below
+3 % per epoch.  Exceeding this threshold indicates the attestation guard
+is insufficiently screening entrants and MUST trigger an alert.
+
+**Source**: Identity pilot target: `<3 % sybil rate` (ROADMAP Q1 provisional).

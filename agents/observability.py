@@ -189,12 +189,13 @@ def _render_dashboard(findings: list[FindingRecord]) -> None:
         by_agent.setdefault(f.agent.value, []).append(f)
 
     agent_labels = {
-        "agent1_tx_fuzzer":  "Agent 1  TxFuzzer",
-        "agent2_economic":   "Agent 2  EconomicAttacker",
-        "agent3_gossip":     "Agent 3  GossipAdversary",
-        "agent4_sybil":      "Agent 4  SybilProbe",
-        "agent5_invariant":  "Agent 5  InvariantMonitor",
-        "agent6_patch":      "Agent 6  PatchProposer",
+        "agent1_tx_fuzzer":      "Agent 1  TxFuzzer",
+        "agent2_economic":       "Agent 2  EconomicAttacker",
+        "agent3_gossip":         "Agent 3  GossipAdversary",
+        "agent4_sybil":          "Agent 4  SybilProbe",
+        "agent5_invariant":      "Agent 5  InvariantMonitor",
+        "agent6_patch":          "Agent 6  PatchProposer",
+        "agent_identity_pilot":  "Agent 8  IdentityPilot",
     }
 
     for agent_id, afindings in sorted(by_agent.items()):

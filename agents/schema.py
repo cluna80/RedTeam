@@ -21,12 +21,13 @@ class Severity(str, Enum):
 
 
 class AgentId(str, Enum):
-    TX_FUZZER      = "agent1_tx_fuzzer"
-    ECONOMIC       = "agent2_economic"
-    GOSSIP         = "agent3_gossip"
-    SYBIL          = "agent4_sybil"
-    INVARIANT      = "agent5_invariant"
-    PATCH_PROPOSER = "agent6_patch"
+    TX_FUZZER       = "agent1_tx_fuzzer"
+    ECONOMIC        = "agent2_economic"
+    GOSSIP          = "agent3_gossip"
+    SYBIL           = "agent4_sybil"
+    INVARIANT       = "agent5_invariant"
+    PATCH_PROPOSER  = "agent6_patch"
+    IDENTITY_PILOT  = "agent_identity_pilot"   # Phase A–D attestation-guard tests
 
 
 @dataclass
@@ -40,7 +41,7 @@ class FindingRecord:
     agent:        AgentId
     title:        str
     severity:     Severity
-    invariant_id: int | None        # 1-10 per invariants.md, None if N/A
+    invariant_id: int | None        # 1-15 per invariants.md (11-15 = identity pilot), None if N/A
     steps:        list[str]         # ordered reproduction steps
     expected:     str               # what the protocol should have done
     actual:       str               # what actually happened
