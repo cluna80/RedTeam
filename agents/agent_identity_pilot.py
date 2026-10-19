@@ -611,6 +611,8 @@ def main() -> None:
     parser.add_argument("--config",          required=True, type=Path)
     parser.add_argument("--findings-dir",    type=Path, default=Path("agents/findings"))
     parser.add_argument("--attack",          help="Run only IP-N (e.g. IP-4)")
+    parser.add_argument("--once",            action="store_true",
+                        help="Accepted for runner compatibility (attacks always run once)")
     parser.add_argument("--unsafe-override", action="store_true")
     args = parser.parse_args()
 

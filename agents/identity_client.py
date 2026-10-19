@@ -15,7 +15,7 @@ Tx types (per Qattice attestation guard spec):
   Phase D — ReverseSybil         : undo a ConfirmSybil after a successful appeal
 
 [ASSUMPTION] All field names below mirror the on-chain structs.
-Real names: grep -rn 'AttestEntity\|RevokeAttestation\|ConfirmSybil' chain-forge-node/src/
+Real names: grep -rn 'AttestEntity|RevokeAttestation|ConfirmSybil' chain-forge-node/src/
 """
 from __future__ import annotations
 
@@ -248,7 +248,7 @@ def get_entity_status(
     frozen, sybil_confirmed, and attestation_count fields.
 
     [ASSUMPTION] endpoint path
-    Real path: grep 'entity\|pop_verified' chain-forge-node/src/api/
+    Real path: grep 'entity|pop_verified' chain-forge-node/src/api/
     """
     try:
         r = client.get(f"{api_url}/api/identity/entity/{entity_id}", timeout=10.0)
@@ -270,7 +270,7 @@ def get_pilot_stats(
     total_confirmed_sybil, and cost_per_verification metrics.
 
     [ASSUMPTION] endpoint path
-    Real path: grep 'pilot.*stats\|sybil_rate' chain-forge-node/src/api/
+    Real path: grep 'pilot.*stats|sybil_rate' chain-forge-node/src/api/
     """
     try:
         r = client.get(f"{api_url}/api/identity/pilot/stats", timeout=10.0)
