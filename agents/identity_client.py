@@ -159,6 +159,52 @@ def queued(status: int, body: dict[str, Any]) -> bool:
     return status == 200 and body.get("status") == "queued"
 
 
+def tx_id_from_response(body: dict[str, Any]) -> str | None:
+    """Extract the tx_id from a successful /api/tx POST response body."""
+    return body.get("tx_id") or body.get("id")
+
+
+def fetch_tx_result(
+    client: httpx.Client,
+    api_url: str,
+    tx_id: str,
+    timeout: float = 10.0,
+) -> tuple[int, dict[str, Any]]:
+    """
+    GET /api/tx/{tx_id} — fetch the on-chain execution result of a tx.
+
+    Returns (http_status, body).  body fields of interest:
+      success: bool  — True iff the tx executed without error
+      error: str     — execution error message when success=False
+      events: list   — emitted events
+    """
+    try:
+        r = client.get(f"{api_url}/api/tx/{tx_id}", timeout=timeout)
+        try:
+            body: dict[str, Any] = r.json()
+        except Exception:
+            body = {"raw": r.text[:500]}
+        return r.status_code, body
+    except Exception as exc:
+        return 0, {"error": str(exc)}
+
+
+def tx_execution_succeeded(
+    client: httpx.Client,
+    api_url: str,
+    tx_id: str,
+    timeout: float = 10.0,
+) -> bool | None:
+    """
+    Return True/False based on the on-chain execution result of tx_id.
+    Returns None if the tx is not yet found (not included in a block).
+    """
+    status, body = fetch_tx_result(client, api_url, tx_id, timeout=timeout)
+    if status == 404 or body.get("error") == "not found":
+        return None
+    return bool(body.get("success", False))
+
+
 # ---------------------------------------------------------------------------
 # Phase 0 — RegisterIdentity
 # ---------------------------------------------------------------------------

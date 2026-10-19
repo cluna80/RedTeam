@@ -49,7 +49,14 @@ from agents.identity_client import (
     get_entity_status,
     get_pilot_stats,
     rejected,
+    tx_id_from_response,
+    fetch_tx_result,
 )
+
+# Well-known funded genesis addresses
+_ALICE = "qcb1alice"
+_BOB   = "qcb1bob"
+_DAVE  = "qcb1dave"
 
 log = StructuredLogger("agent_identity_pilot")
 
@@ -93,39 +100,61 @@ def _wait_confirm() -> None:
 
 def attack_ip1_self_attest(client: httpx.Client, cfg: dict[str, Any]) -> list[FindingRecord]:
     """
-    AttestEntity where attester_controller == subject_controller.
-    The chain MUST reject this (INV-11).
+    AttestEntity where attester_controller == subject_controller (i.e., sender
+    attests themselves).  The chain MUST reject this (INV-11).
+
+    Uses Alice (funded genesis account) so gas is available.  Verifies via
+    GET /api/tx/{id} that the execution result has success=False; a 200/queued
+    mempool response alone does not mean the tx executed successfully.
     """
     findings: list[FindingRecord] = []
     api = _api(cfg)
-    ctrl = f"ctrl-selfattest-{uuid.uuid4().hex[:8]}"
-    entity_id = f"entity-sa-{uuid.uuid4().hex[:8]}"
 
+    # Alice attests herself — sender == claimant_id
     s, b = attest_entity(
         client, api,
-        entity_id=entity_id,
-        subject_controller=ctrl,
-        attester_controller=ctrl,   # same — must be rejected
+        entity_id=_ALICE,
+        subject_controller=_ALICE,
+        attester_controller=_ALICE,   # same — must be rejected
     )
-    log.info("[IP-1] self-attest", status=s, entity_id=entity_id, ctrl=ctrl)
+    tx_id = tx_id_from_response(b)
+    log.info("[IP-1] self-attest submitted", status=s, tx_id=tx_id)
 
-    if not rejected(s, b):
+    # Wait for block inclusion, then check execution result
+    import time; time.sleep(TX_CONFIRM_WAIT_SECS)
+
+    exec_ok: bool | None = None
+    exec_body: dict = {}
+    if tx_id:
+        _, exec_body = fetch_tx_result(client, api, tx_id)
+        exec_ok = exec_body.get("success", None)
+
+    log.info("[IP-1] self-attest execution result", success=exec_ok,
+             error=exec_body.get("error"))
+
+    if rejected(s, b):
+        # Mempool-level rejection is acceptable (stricter than required)
+        log.info("[IP-1] self-attest correctly rejected at HTTP layer ✓")
+    elif exec_ok is True:
+        # Tx executed — self-attest was NOT blocked at execution
         findings.append(_finding(
             inv=11,
             title="AttestEntity accepted with attester == subject controller",
             severity=Severity.CRITICAL,
             steps=[
-                f"POST /api/tx AttestEntity entity_id={entity_id}",
-                f"subject_controller={ctrl} == attester_controller={ctrl}",
-                f"Response: status={s}",
+                f"POST /api/tx AttestEntity entity_id={_ALICE} sender={_ALICE}",
+                f"attester_controller == subject (self-attest)",
+                f"Execution result: success={exec_ok}",
             ],
             expected="Tx rejected — self-attestation is prohibited (INV-11)",
-            actual=f"Tx accepted with status={s}",
-            evidence={"entity_id": entity_id, "ctrl": ctrl, "resp": b},
+            actual=f"Tx accepted with status={s}, execution success={exec_ok}",
+            evidence={"entity_id": _ALICE, "exec": exec_body},
         ))
         log.finding(findings[-1])
     else:
-        log.info("[IP-1] self-attest correctly rejected ✓", status=s)
+        # exec_ok is False — chain rejected at execution ✓
+        log.info("[IP-1] self-attest correctly rejected at execution ✓",
+                 error=exec_body.get("error"))
 
     return findings
 
