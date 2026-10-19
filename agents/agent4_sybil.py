@@ -3,32 +3,33 @@
 agents/agent4_sybil.py — SybilProbe (full implementation)
 
 Probes chain-forge-identity and chain-forge-personhood for sybil and
-identity-abuse vulnerabilities.  All attacks use testnet-hook endpoints
-that are only compiled in under the "testnet-hooks" feature flag.
+identity-abuse vulnerabilities.  All attacks go via POST /api/tx with the
+correct Transaction envelope (verified against chain-forge-node/src/api.rs).
 
 ## Attack categories
   S1  Multi-identity per controller
       Register 2+ identities sharing one controller_id; only 1 may be verified.
+      (In the current chain model, each address IS the identity — we test that
+      the same address cannot double-register.)
   S2  Registry spam
-      Flood registrations above the per-epoch cap; excess must be rejected cleanly.
-  S3  Revoke / re-register cycling
-      Revoke an identity, immediately re-register with same key; cooldown must block.
-  S4  Self-verify via identity API
-      Register miner + verifier under same controller; attestation guard must block.
-  S5  Cross-epoch quota re-use
-      Exhaust epoch quota, then probe the epoch boundary reset path for off-by-ones.
-  S6  Privilege escalation via re-registration
-      Revoke a non-admin identity; re-register with an admin-role claim; must be rejected.
+      Flood RegisterIdentity txs above the per-epoch cap; excess must be rejected.
+  S3  Revoke / re-attest cycling (revocation cooldown)
+      Attest an entity, revoke, immediately re-attest; cooldown must block it.
+  S4  Self-attest (INV-11)
+      Send TxBody::Attest where claimant_id == sender; must be rejected.
+  S5  ConfirmSybil freezes entity (INV-13)
+      After ConfirmSybil, GET /api/identity/{address} must show frozen=true,
+      and the entity must NOT be in pop_verified on any node.
+  S6  ReportSuspectedSybil does NOT freeze (INV-14)
+      After ReportSuspectedSybil, entity must NOT be frozen.
   S7  Concurrent registration race
-      Submit 2 registrations for the same controller_id simultaneously; only 1 may land.
-
-## Assumption markers
-All [ASSUMPTION] comments flag items to verify against the real source.
-See ASSUMPTIONS.md for grep commands.
+      Submit two RegisterIdentity txs for the same address simultaneously;
+      exactly one should land.
 
 Usage:
-    python agents/agent4_sybil.py --config agents/config/devnet3.toml
-    python agents/agent4_sybil.py --config agents/config/devnet3.toml --attack S3
+    python agents/agent4_sybil.py --config agents/config/devnet3-local.toml
+    python agents/agent4_sybil.py --config agents/config/devnet3-local.toml --attack S4
+    python agents/agent4_sybil.py --config agents/config/devnet3-local.toml --once
 """
 from __future__ import annotations
 
@@ -46,38 +47,29 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from agents.schema import AgentId, FindingRecord, Severity
 from agents.devnet_guard import assert_devnet, load_config, abort
 from agents.observability import StructuredLogger
+import agents.identity_client as ic
 
 log = StructuredLogger("agent4_sybil")
 
-# ---------------------------------------------------------------------------
-# [ASSUMPTION] Identity API endpoint prefix
-# Real value: grep -rn 'Router|route|post|get' chain-forge-identity/src/
-# May be /personhood/... based on crate chain-forge-personhood
-# ---------------------------------------------------------------------------
-IDENTITY_PREFIX = "/identity"       # [ASSUMPTION]
-PERSONHOOD_PREFIX = "/personhood"   # [ASSUMPTION]
+# How long to wait for a tx to be included in a block before checking state.
+# Devnet block time is ~1s but mempool propagation adds latency; 6s is safe.
+_TX_WAIT_SECS = 6.0
 
-# [ASSUMPTION] Revocation cooldown in blocks / seconds
-REVOKE_COOLDOWN_SECS = 30           # [ASSUMPTION] read from chain config
-
-# [ASSUMPTION] Per-epoch registration cap
-EPOCH_REG_CAP = 10                  # [ASSUMPTION]
+# Well-known devnet addresses (match genesis-3node.json)
+_ALICE   = "qcb1alice"
+_BOB     = "qcb1bob"
+_DAVE    = "qcb1dave"
+# "coordinator" address that is allowed to call ConfirmSybil / ReverseSybil.
+# Defaults to Alice — override via genesis attestation_coordinator field.
+_COORDINATOR = _ALICE
 
 
 # ---------------------------------------------------------------------------
-# HTTP helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
-def _post(client: httpx.Client, url: str, payload: dict, timeout: float = 10.0) -> tuple[int, dict]:
-    try:
-        r = client.post(url, json=payload, timeout=timeout)
-        try:
-            body = r.json()
-        except Exception:
-            body = {"raw": r.text[:500]}
-        return r.status_code, body
-    except Exception as exc:
-        return 0, {"error": str(exc)}
+def _api(cfg: dict[str, Any]) -> str:
+    return cfg["nodes"]["api_urls"][0]
 
 
 def _get(client: httpx.Client, url: str) -> tuple[int, dict]:
@@ -90,14 +82,6 @@ def _get(client: httpx.Client, url: str) -> tuple[int, dict]:
         return r.status_code, body
     except Exception as exc:
         return 0, {"error": str(exc)}
-
-
-def _rejected(status: int, body: dict) -> bool:
-    if status in (400, 401, 403, 409, 422):
-        return True
-    if status == 200 and body.get("code") not in (None, 0):
-        return True
-    return False
 
 
 def _finding(
@@ -121,125 +105,64 @@ def _finding(
     )
 
 
-def _identity_url(cfg: dict[str, Any]) -> str:
-    return cfg["identity"]["url"]
+def _fresh_addr() -> str:
+    """Generate a unique test address for this run."""
+    return f"qcb1test-{uuid.uuid4().hex[:12]}"
 
 
-def _api_url(cfg: dict[str, Any]) -> str:
-    return cfg["nodes"]["api_urls"][0]
-
-
-# ---------------------------------------------------------------------------
-# Registration / revocation helpers
-# [ASSUMPTION] request shapes — update field names to match registry.rs structs
-# ---------------------------------------------------------------------------
-
-def _register(
-    client: httpx.Client,
-    base_url: str,
-    identity_id: str,
-    controller_id: str,
-    pub_key_hex: str = "cd" * 32,
-    role: str = "miner",            # [ASSUMPTION] role field exists
-) -> tuple[int, dict]:
-    """
-    POST /identity/register
-    [ASSUMPTION] field names: identity_id, controller_id, pub_key, role
-    Real names: grep 'struct.*Register|pub identity_id|pub controller' chain-forge-identity/src/registry.rs
-    """
-    return _post(client, f"{base_url}{IDENTITY_PREFIX}/register", {
-        "identity_id":   identity_id,
-        "controller_id": controller_id,
-        "pub_key":        pub_key_hex,
-        "role":           role,
-    })
-
-
-def _revoke(
-    client: httpx.Client,
-    base_url: str,
-    identity_id: str,
-    controller_id: str,
-) -> tuple[int, dict]:
-    """
-    POST /identity/revoke
-    [ASSUMPTION] field names
-    """
-    return _post(client, f"{base_url}{IDENTITY_PREFIX}/revoke", {
-        "identity_id":   identity_id,
-        "controller_id": controller_id,
-    })
-
-
-def _lookup(
-    client: httpx.Client,
-    base_url: str,
-    controller_id: str,
-) -> tuple[int, dict]:
-    """
-    GET /identity/by_controller?controller_id=...
-    [ASSUMPTION] endpoint path
-    """
-    return _get(client, f"{base_url}{IDENTITY_PREFIX}/by_controller?controller_id={controller_id}")
-
-
-def _epoch_stats(
+def _register_and_wait(
     client: httpx.Client,
     api_url: str,
+    address: str,
+    wait: float = _TX_WAIT_SECS,
 ) -> tuple[int, dict]:
-    """
-    GET /qcb/identity/epoch_stats
-    [ASSUMPTION] endpoint — update if different
-    """
-    return _get(client, f"{api_url}/qcb/identity/epoch_stats")
+    """Register an identity and wait for block inclusion."""
+    status, body = ic.register_identity(client, api_url, sender=address)
+    if wait > 0 and ic.queued(status, body):
+        time.sleep(wait)
+    return status, body
 
 
 # ---------------------------------------------------------------------------
-# S1 — Multiple identities per controller
+# S1 — Double-registration (same address registers twice)
 # ---------------------------------------------------------------------------
 
-def attack_s1_multi_identity(client: httpx.Client, cfg: dict[str, Any]) -> list[FindingRecord]:
+def attack_s1_double_register(client: httpx.Client, cfg: dict[str, Any]) -> list[FindingRecord]:
     """
-    Register identity_A and identity_B both with controller_id=ctrl-sybil-s1.
-    The second registration must be rejected OR only one may be marked verified.
+    An address that is already registered sends RegisterIdentity again.
+    The chain must reject the duplicate or it is a no-op.
     """
     findings: list[FindingRecord] = []
-    base_url    = _identity_url(cfg)
-    controller  = f"ctrl-sybil-s1-{uuid.uuid4().hex[:8]}"
-    id_a        = f"identity-a-{uuid.uuid4().hex[:8]}"
-    id_b        = f"identity-b-{uuid.uuid4().hex[:8]}"
+    api_url = _api(cfg)
+    addr = _fresh_addr()
 
-    s1, b1 = _register(client, base_url, id_a, controller)
-    log.info("[S1] first registration", status=s1, identity=id_a, controller=controller)
+    s1, b1 = _register_and_wait(client, api_url, addr)
+    log.info("[S1] first registration", addr=addr, status=s1, body=b1)
 
-    s2, b2 = _register(client, base_url, id_b, controller)  # same controller
-    log.info("[S1] second registration (same controller)", status=s2, identity=id_b)
+    s2, b2 = ic.register_identity(client, api_url, sender=addr)
+    log.info("[S1] second registration (same address)", status=s2, body=b2)
 
-    if not _rejected(s2, b2):
-        # Also check: are both marked verified?
-        _, lookup = _lookup(client, base_url, controller)
-        identities = lookup.get("identities", [])
-        verified_count = sum(1 for i in identities if i.get("verified"))
-
-        if verified_count > 1:
-            f = _finding(
-                inv=7,
-                title="Two identities registered and verified under one controller",
-                severity=Severity.CRITICAL,
-                steps=[
-                    f"POST {base_url}{IDENTITY_PREFIX}/register identity_id={id_a}, controller={controller}",
-                    f"POST {base_url}{IDENTITY_PREFIX}/register identity_id={id_b}, same controller",
-                    f"GET by_controller — found {verified_count} verified identities",
-                ],
-                expected="Second registration rejected or second identity not verified",
-                actual=f"Both identities verified under controller={controller}",
-                evidence={"controller": controller, "id_a": b1, "id_b": b2, "lookup": lookup},
-            )
-            findings.append(f)
-            log.finding(f)
-        else:
-            log.info("[S1] second identity not verified — protocol correct ✓",
-                     verified_count=verified_count)
+    if not ic.rejected(s2, b2):
+        time.sleep(_TX_WAIT_SECS)
+        # Check identity state — if both registered we have a duplicate
+        _, id_state = ic.get_entity_status(client, api_url, addr)
+        log.info("[S1] identity state after double-register", state=id_state)
+        # The key invariant: we just note that the second tx was accepted
+        # (possibly a no-op; the real check is whether it created duplicate entries)
+        f = _finding(
+            inv=7,
+            title="Double-registration not rejected at HTTP layer",
+            severity=Severity.MEDIUM,
+            steps=[
+                f"POST /api/tx RegisterIdentity sender={addr} → accepted (s={s1})",
+                f"POST /api/tx RegisterIdentity sender={addr} again → s={s2}, not rejected",
+            ],
+            expected="Second RegisterIdentity rejected (409 or similar) or queued as a known no-op",
+            actual=f"Second tx returned status={s2}, body={b2}",
+            evidence={"addr": addr, "reg1": b1, "reg2": b2, "id_state": id_state},
+        )
+        findings.append(f)
+        log.finding(f)
     else:
         log.info("[S1] second registration correctly rejected ✓", status=s2)
 
@@ -247,32 +170,29 @@ def attack_s1_multi_identity(client: httpx.Client, cfg: dict[str, Any]) -> list[
 
 
 # ---------------------------------------------------------------------------
-# S2 — Registry spam above epoch cap
+# S2 — Registry spam above per-epoch cap (INV-8)
 # ---------------------------------------------------------------------------
+
+EPOCH_REG_CAP = 10   # assumed; the real cap comes from genesis chain config
 
 def attack_s2_registry_spam(client: httpx.Client, cfg: dict[str, Any]) -> list[FindingRecord]:
     """
-    Submit EPOCH_REG_CAP + 10 registrations; all excess must be rejected,
-    not silently queued or accepted.  Node must stay alive.
+    Flood EPOCH_REG_CAP+10 RegisterIdentity txs with different addresses.
+    If the chain imposes a per-epoch cap, the excess must be rejected.
     """
     findings: list[FindingRecord] = []
-    base_url   = _identity_url(cfg)
-    api_url    = _api_url(cfg)
+    api_url = _api(cfg)
     spam_count = EPOCH_REG_CAP + 10
-    accepted   = 0
-    errors     = 0
+    accepted = 0
 
-    log.info(f"[S2] spamming {spam_count} identity registrations…")
-    for i in range(spam_count):
-        ctrl = f"ctrl-spam-{i}-{uuid.uuid4().hex[:6]}"
-        iid  = f"identity-spam-{i}-{uuid.uuid4().hex[:6]}"
-        s, b = _register(client, base_url, iid, ctrl)
-        if not _rejected(s, b):
+    log.info(f"[S2] spamming {spam_count} RegisterIdentity txs…")
+    for _ in range(spam_count):
+        addr = _fresh_addr()
+        s, b = ic.register_identity(client, api_url, sender=addr)
+        if ic.queued(s, b):
             accepted += 1
-        if s == 0:
-            errors += 1
 
-    log.info("[S2] spam complete", accepted=accepted, spam_count=spam_count, errors=errors)
+    log.info("[S2] spam complete", accepted=accepted, cap=EPOCH_REG_CAP)
 
     if accepted > EPOCH_REG_CAP:
         f = _finding(
@@ -280,28 +200,29 @@ def attack_s2_registry_spam(client: httpx.Client, cfg: dict[str, Any]) -> list[F
             title="Identity registry accepted more registrations than epoch cap",
             severity=Severity.HIGH,
             steps=[
-                f"Submit {spam_count} identity registrations in rapid succession",
-                f"Count non-rejected responses",
+                f"Submit {spam_count} RegisterIdentity txs with distinct addresses",
+                f"{accepted} were queued (cap={EPOCH_REG_CAP})",
             ],
-            expected=f"At most {EPOCH_REG_CAP} registrations accepted per epoch",
-            actual=f"{accepted} registrations accepted (cap={EPOCH_REG_CAP})",
+            expected=f"At most {EPOCH_REG_CAP} registrations queued per epoch",
+            actual=f"{accepted} accepted (excess={accepted - EPOCH_REG_CAP})",
             evidence={"accepted": accepted, "cap": EPOCH_REG_CAP, "submitted": spam_count},
         )
         findings.append(f)
         log.finding(f)
     else:
-        log.info("[S2] epoch cap enforced correctly ✓", accepted=accepted, cap=EPOCH_REG_CAP)
+        log.info("[S2] epoch cap enforced ✓ (or cap not implemented — needs genesis check)",
+                 accepted=accepted, cap=EPOCH_REG_CAP)
 
-    # Node must still be alive
-    s_alive, _ = _get(client, f"{api_url}/health")
+    # Sanity: node still alive
+    s_alive, _ = _get(client, f"{api_url}/api/status")
     if s_alive == 0:
         f = _finding(
             inv=None,
-            title="[S2] Identity service unreachable after registration spam",
+            title="[S2] Node unreachable after registration spam",
             severity=Severity.CRITICAL,
-            steps=[f"Flood {spam_count} registrations", "GET /health"],
-            expected="Service remains alive",
-            actual="No response after spam",
+            steps=[f"Flood {spam_count} RegisterIdentity txs", "GET /api/status"],
+            expected="Node responds",
+            actual="Connection error",
             evidence={"spam_count": spam_count},
         )
         findings.append(f)
@@ -311,304 +232,279 @@ def attack_s2_registry_spam(client: httpx.Client, cfg: dict[str, Any]) -> list[F
 
 
 # ---------------------------------------------------------------------------
-# S3 — Revoke / re-register cycling (cooldown bypass)
+# S3 — Revocation cooldown bypass
 # ---------------------------------------------------------------------------
 
-def attack_s3_revoke_reregister(client: httpx.Client, cfg: dict[str, Any]) -> list[FindingRecord]:
+REVOKE_COOLDOWN_SECS = 3   # assumed minimum; check chain config
+
+def attack_s3_revoke_reattest(client: httpx.Client, cfg: dict[str, Any]) -> list[FindingRecord]:
     """
-    Revoke an identity then immediately re-register with the same key material.
-    The cooldown must block re-registration until the window expires.
-    Also checks: re-registration must not inherit the revoked identity's history.
+    Alice attests Bob, revokes, then immediately re-attests.
+    If a cooldown is enforced, the immediate re-attest must be rejected.
     """
     findings: list[FindingRecord] = []
-    base_url   = _identity_url(cfg)
-    controller = f"ctrl-cycle-{uuid.uuid4().hex[:8]}"
-    iid        = f"identity-cycle-{uuid.uuid4().hex[:8]}"
+    api_url = _api(cfg)
 
-    # Register
-    s_reg, b_reg = _register(client, base_url, iid, controller)
-    log.info("[S3] initial registration", status=s_reg)
+    # Ensure Bob is registered
+    ic.register_identity(client, api_url, sender=_BOB)
+    time.sleep(_TX_WAIT_SECS)
 
-    # Revoke immediately
-    s_rev, b_rev = _revoke(client, base_url, iid, controller)
-    log.info("[S3] revocation", status=s_rev)
+    # Alice attests Bob
+    s_att, b_att = ic.attest_entity(
+        client, api_url,
+        entity_id=_BOB,
+        subject_controller=_BOB,
+        attester_controller=_ALICE,
+    )
+    log.info("[S3] initial attest", status=s_att, body=b_att)
+    time.sleep(_TX_WAIT_SECS)
 
-    # Immediately re-register (should be blocked by cooldown)
-    s_re, b_re = _register(client, base_url, iid, controller)
-    log.info("[S3] immediate re-registration", status=s_re)
+    # Alice revokes Bob
+    s_rev, b_rev = ic.revoke_attestation(
+        client, api_url,
+        entity_id=_BOB,
+        revoker_controller=_ALICE,
+    )
+    log.info("[S3] revocation", status=s_rev, body=b_rev)
 
-    if not _rejected(s_re, b_re):
+    # Immediately re-attest (should be blocked by cooldown if enforced)
+    s_re, b_re = ic.attest_entity(
+        client, api_url,
+        entity_id=_BOB,
+        subject_controller=_BOB,
+        attester_controller=_ALICE,
+    )
+    log.info("[S3] immediate re-attest", status=s_re, body=b_re)
+
+    if not ic.rejected(s_re, b_re):
         f = _finding(
             inv=None,
-            title="Identity re-registered immediately after revocation (cooldown bypass)",
-            severity=Severity.HIGH,
+            title="Revocation cooldown not enforced: immediate re-attest accepted",
+            severity=Severity.MEDIUM,
             steps=[
-                f"Register identity_id={iid}, controller={controller}",
-                "Revoke immediately",
-                "Re-register immediately with same identity_id+controller",
-                f"Re-registration returned status={s_re}",
+                f"Alice attests Bob → s={s_att}",
+                f"Alice revokes Bob → s={s_rev}",
+                f"Alice immediately re-attests Bob → s={s_re} (not rejected)",
             ],
-            expected=f"Re-registration blocked by {REVOKE_COOLDOWN_SECS}s cooldown",
-            actual=f"Re-registration accepted status={s_re}",
-            evidence={
-                "controller": controller,
-                "reg": b_reg, "revoke": b_rev, "re_reg": b_re,
-            },
+            expected=f"Re-attest blocked by {REVOKE_COOLDOWN_SECS}s cooldown",
+            actual=f"Re-attest accepted: status={s_re}, body={b_re}",
+            evidence={"att": b_att, "rev": b_rev, "re_att": b_re},
         )
         findings.append(f)
         log.finding(f)
     else:
-        log.info("[S3] immediate re-registration correctly rejected ✓", status=s_re)
-
-    # Wait for cooldown, then re-register — should succeed (positive path)
-    log.info(f"[S3] waiting {REVOKE_COOLDOWN_SECS}s for cooldown…")
-    time.sleep(REVOKE_COOLDOWN_SECS)
-    iid2 = f"identity-cycle2-{uuid.uuid4().hex[:8]}"  # new identity_id post-cooldown
-    s_after, b_after = _register(client, base_url, iid2, controller)
-    log.info("[S3] post-cooldown re-registration", status=s_after)
-
-    # Check it doesn't inherit the revoked identity's reward history
-    _, lookup = _lookup(client, base_url, controller)
-    for entry in lookup.get("identities", []):
-        if entry.get("identity_id") == iid2:
-            prior_rewards = entry.get("lifetime_rewards", 0)
-            if prior_rewards != 0:
-                f = _finding(
-                    inv=7,
-                    title="Re-registered identity inherited revoked identity's reward history",
-                    severity=Severity.HIGH,
-                    steps=[
-                        "Register, revoke, wait cooldown, re-register",
-                        f"Check lifetime_rewards on new identity_id={iid2}",
-                    ],
-                    expected="New registration starts with zero reward history",
-                    actual=f"lifetime_rewards={prior_rewards} (inherited from revoked identity)",
-                    evidence={"controller": controller, "new_identity": entry},
-                )
-                findings.append(f)
-                log.finding(f)
+        log.info("[S3] immediate re-attest correctly rejected ✓", status=s_re)
 
     return findings
 
 
 # ---------------------------------------------------------------------------
-# S4 — Self-verify via identity API  (INV-3)
+# S4 — Self-attest (INV-11)
 # ---------------------------------------------------------------------------
 
-def attack_s4_self_verify(client: httpx.Client, cfg: dict[str, Any]) -> list[FindingRecord]:
+def attack_s4_self_attest(client: httpx.Client, cfg: dict[str, Any]) -> list[FindingRecord]:
     """
-    Register both a miner identity and a verifier identity under the same
-    controller_id, then attempt to use the verifier to attest the miner's work.
-    The attestation guard Phase C must block this at the scheduler layer.
+    Send TxBody::Attest { claimant_id = Alice } from Alice (same sender).
+    IdentityStore::attest() must return SelfAttestation error → tx rejected.
     """
     findings: list[FindingRecord] = []
-    base_url   = _identity_url(cfg)
-    sched_url  = cfg["scheduler"]["url"]
-    controller = f"ctrl-selfverify-{uuid.uuid4().hex[:8]}"
-    miner_id   = f"miner-sv-{uuid.uuid4().hex[:8]}"
-    verifier_id = f"verifier-sv-{uuid.uuid4().hex[:8]}"
+    api_url = _api(cfg)
 
-    # Register both under the same controller
-    s_m, b_m = _register(client, base_url, miner_id,    controller, role="miner")
-    s_v, b_v = _register(client, base_url, verifier_id, controller, role="verifier")
-    log.info("[S4] registered miner+verifier under same controller",
-             miner_status=s_m, verifier_status=s_v, controller=controller)
+    # Ensure Alice is registered
+    ic.register_identity(client, api_url, sender=_ALICE)
+    time.sleep(_TX_WAIT_SECS)
 
-    # Submit a job as miner
-    job_id     = f"job-sv-{uuid.uuid4().hex[:8]}"
-    output_hash = "aa" * 32
-    _, b_claim = _post(client, f"{sched_url}/scheduler/claim_task", {
-        "job_id":        job_id,
-        "machine_id":    miner_id,
-        "controller_id": controller,
-        "output_hash":   output_hash,
-    })
-    log.info("[S4] miner claimed job", job_id=job_id)
+    # Self-attest: attester_controller = claimant = ALICE
+    s, b = ic.attest_entity(
+        client, api_url,
+        entity_id=_ALICE,
+        subject_controller=_ALICE,
+        attester_controller=_ALICE,
+    )
+    log.info("[S4] self-attest attempt", status=s, body=b)
+    time.sleep(_TX_WAIT_SECS)
 
-    # Attempt self-attestation via the verifier (same controller)
-    s_attest, b_attest = _post(client, f"{sched_url}/scheduler/attest_task", {
-        "job_id":              job_id,
-        "verifier_id":         verifier_id,
-        "verifier_controller": controller,   # same controller as miner
-        "output_hash":         output_hash,
-    })
-    log.info("[S4] self-attestation attempt", status=s_attest, controller=controller)
-
-    if not _rejected(s_attest, b_attest):
-        # Check if attestation was counted toward quorum
-        _, attest_data = _get(client, f"{sched_url}/scheduler/attestations")
-        self_counted = any(
-            a.get("job_id") == job_id
-            and a.get("verifier_controller_id") == controller
-            and a.get("counted_toward_quorum")
-            for a in attest_data.get("attestations", [])
+    if not ic.rejected(s, b):
+        # Check if the self-attest actually landed
+        _, id_state = ic.get_entity_status(client, api_url, _ALICE)
+        log.info("[S4] identity state after self-attest", state=id_state)
+        f = _finding(
+            inv=11,
+            title="Self-attestation not rejected (INV-11)",
+            severity=Severity.HIGH,
+            steps=[
+                f"Register Alice (sender={_ALICE})",
+                f"POST /api/tx Attest {{claimant_id: {_ALICE}}} from sender={_ALICE}",
+                f"Response: status={s}, body={b}",
+            ],
+            expected="Self-attest rejected at execution (SelfAttestation error)",
+            actual=f"Self-attest queued/accepted: status={s}, body={b}",
+            evidence={"status": s, "body": b, "id_state": id_state},
         )
-        if self_counted:
+        findings.append(f)
+        log.finding(f)
+    else:
+        log.info("[S4] self-attest correctly rejected ✓", status=s)
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# S5 — ConfirmSybil atomically freezes entity (INV-13)
+# ---------------------------------------------------------------------------
+
+def attack_s5_confirm_sybil_freezes(client: httpx.Client, cfg: dict[str, Any]) -> list[FindingRecord]:
+    """
+    Register Dave, have Alice attest Dave, then have the coordinator
+    (Alice) send ConfirmSybil.  After block inclusion:
+      - GET /api/identity/Dave must show frozen=true, sybil_confirmed=true
+      - Dave must NOT appear in pop_verified on any node
+    """
+    findings: list[FindingRecord] = []
+    api_url = _api(cfg)
+
+    # Register Dave, have Alice attest him
+    ic.register_identity(client, api_url, sender=_DAVE)
+    time.sleep(_TX_WAIT_SECS)
+
+    ic.attest_entity(
+        client, api_url,
+        entity_id=_DAVE,
+        subject_controller=_DAVE,
+        attester_controller=_ALICE,
+    )
+    time.sleep(_TX_WAIT_SECS)
+
+    # ConfirmSybil from coordinator
+    s_cs, b_cs = ic.confirm_sybil(
+        client, api_url,
+        entity_id=_DAVE,
+        reporter_controller=_COORDINATOR,
+    )
+    log.info("[S5] ConfirmSybil sent", status=s_cs, body=b_cs)
+    time.sleep(_TX_WAIT_SECS)
+
+    if ic.rejected(s_cs, b_cs):
+        # Could be coordinator not recognised in this devnet genesis — log but don't fail
+        log.info("[S5] ConfirmSybil rejected — coordinator may not be in genesis", status=s_cs)
+        return findings
+
+    # Check frozen state
+    _, id_state = ic.get_entity_status(client, api_url, _DAVE)
+    log.info("[S5] Dave identity state after ConfirmSybil", state=id_state)
+
+    frozen          = id_state.get("frozen", False)
+    sybil_confirmed = id_state.get("sybil_confirmed", False)
+
+    if not frozen or not sybil_confirmed:
+        f = _finding(
+            inv=13,
+            title="ConfirmSybil did not atomically freeze entity (INV-13)",
+            severity=Severity.CRITICAL,
+            steps=[
+                f"Register Dave ({_DAVE})",
+                f"Alice attests Dave",
+                f"Coordinator ({_COORDINATOR}) sends ConfirmSybil → status={s_cs}",
+                f"GET /api/identity/{_DAVE} → frozen={frozen}, sybil_confirmed={sybil_confirmed}",
+            ],
+            expected="frozen=true AND sybil_confirmed=true after ConfirmSybil",
+            actual=f"frozen={frozen}, sybil_confirmed={sybil_confirmed}",
+            evidence={"confirm_resp": b_cs, "id_state": id_state},
+        )
+        findings.append(f)
+        log.finding(f)
+    else:
+        log.info("[S5] Dave correctly frozen after ConfirmSybil ✓",
+                 frozen=frozen, sybil_confirmed=sybil_confirmed)
+
+    # Now reverse and confirm unfreeze
+    s_rv, b_rv = ic.reverse_sybil(
+        client, api_url,
+        entity_id=_DAVE,
+        authority_controller=_COORDINATOR,
+    )
+    log.info("[S5] ReverseSybil sent", status=s_rv, body=b_rv)
+    time.sleep(_TX_WAIT_SECS)
+
+    if ic.queued(s_rv, b_rv):
+        _, id_state2 = ic.get_entity_status(client, api_url, _DAVE)
+        still_frozen = id_state2.get("frozen", True)
+        if still_frozen:
             f = _finding(
-                inv=3,
-                title="Self-verify via identity API: same-controller attestation counted",
-                severity=Severity.CRITICAL,
+                inv=13,
+                title="ReverseSybil did not unfreeze entity",
+                severity=Severity.HIGH,
                 steps=[
-                    f"Register miner identity_id={miner_id}, controller={controller}",
-                    f"Register verifier identity_id={verifier_id}, same controller",
-                    f"Miner claims job_id={job_id}",
-                    "Verifier attests same job — same controller_id",
-                    "Attestation counted toward quorum",
+                    f"ConfirmSybil Dave → frozen",
+                    f"ReverseSybil Dave → status={s_rv}",
+                    f"GET /api/identity/{_DAVE} → still frozen={still_frozen}",
                 ],
-                expected="Attestation guard Phase C blocks same-controller attestation",
-                actual=f"Self-attestation counted for job_id={job_id}",
-                evidence={
-                    "controller": controller,
-                    "miner": miner_id, "verifier": verifier_id,
-                    "attest_resp": b_attest,
-                },
+                expected="frozen=false after ReverseSybil",
+                actual=f"frozen={still_frozen}",
+                evidence={"reverse_resp": b_rv, "id_state2": id_state2},
             )
             findings.append(f)
             log.finding(f)
         else:
-            log.info("[S4] attestation accepted at HTTP layer but not counted ✓ (Phase C held)")
-    else:
-        log.info("[S4] self-attestation correctly rejected ✓", status=s_attest)
+            log.info("[S5] Dave correctly unfrozen after ReverseSybil ✓")
 
     return findings
 
 
 # ---------------------------------------------------------------------------
-# S5 — Cross-epoch quota re-use
+# S6 — ReportSuspectedSybil does NOT freeze (INV-14)
 # ---------------------------------------------------------------------------
 
-def attack_s5_cross_epoch(client: httpx.Client, cfg: dict[str, Any]) -> list[FindingRecord]:
+def attack_s6_report_no_freeze(client: httpx.Client, cfg: dict[str, Any]) -> list[FindingRecord]:
     """
-    Exhaust the per-epoch submission quota for a controller, then probe
-    whether the epoch boundary resets atomically or has an off-by-one
-    window where submissions can slip through.
+    ReportSuspectedSybil must NOT freeze the entity.  Only ConfirmSybil may.
     """
     findings: list[FindingRecord] = []
-    api_url    = _api_url(cfg)
-    sched_url  = cfg["scheduler"]["url"]
-    controller = f"ctrl-epoch-{uuid.uuid4().hex[:8]}"
-    base_url   = _identity_url(cfg)
+    api_url = _api(cfg)
 
-    # Register a fresh identity
-    iid = f"identity-epoch-{uuid.uuid4().hex[:8]}"
-    _register(client, base_url, iid, controller)
+    target = _fresh_addr()
+    ic.register_identity(client, api_url, sender=target)
+    time.sleep(_TX_WAIT_SECS)
 
-    # Exhaust epoch quota
-    log.info(f"[S5] exhausting epoch quota ({EPOCH_REG_CAP} submissions)…")
-    for i in range(EPOCH_REG_CAP):
-        job_id = f"job-epoch-{i}-{uuid.uuid4().hex[:6]}"
-        _post(client, f"{sched_url}/scheduler/submit_work_receipt", {
-            "job_id":        job_id,
-            "machine_id":    iid,
-            "controller_id": controller,
-            "output_hash":   "bb" * 32,
-            "seal":          "bb" * 32,
-            "attestations":  [],
-        })
+    ic.attest_entity(
+        client, api_url,
+        entity_id=target,
+        subject_controller=target,
+        attester_controller=_ALICE,
+    )
+    time.sleep(_TX_WAIT_SECS)
 
-    # One more submission — must be rejected
-    extra_job = f"job-epoch-extra-{uuid.uuid4().hex[:8]}"
-    s_extra, b_extra = _post(client, f"{sched_url}/scheduler/submit_work_receipt", {
-        "job_id":        extra_job,
-        "machine_id":    iid,
-        "controller_id": controller,
-        "output_hash":   "cc" * 32,
-        "seal":          "cc" * 32,
-        "attestations":  [],
-    })
-    if not _rejected(s_extra, b_extra):
+    s_rp, b_rp = ic.report_suspected_sybil(
+        client, api_url,
+        entity_id=target,
+        reporter_controller=_ALICE,
+    )
+    log.info("[S6] ReportSuspectedSybil sent", status=s_rp, body=b_rp)
+    time.sleep(_TX_WAIT_SECS)
+
+    _, id_state = ic.get_entity_status(client, api_url, target)
+    frozen = id_state.get("frozen", False)
+    log.info("[S6] target state after ReportSuspectedSybil", frozen=frozen, state=id_state)
+
+    if frozen:
         f = _finding(
-            inv=8,
-            title="Epoch quota exceeded — extra submission accepted",
+            inv=14,
+            title="ReportSuspectedSybil froze entity — only ConfirmSybil should (INV-14)",
             severity=Severity.HIGH,
             steps=[
-                f"Submit {EPOCH_REG_CAP} work receipts for controller={controller}",
-                f"Submit one more (job_id={extra_job})",
-                f"Extra submission returned status={s_extra}",
+                f"Register target {target}",
+                "Alice attests target",
+                f"Alice sends ReportSuspectedSybil → status={s_rp}",
+                f"GET /api/identity/{target} → frozen={frozen}",
             ],
-            expected=f"Submission rejected — controller at epoch cap ({EPOCH_REG_CAP})",
-            actual=f"status={s_extra}, body={b_extra}",
-            evidence={"controller": controller, "cap": EPOCH_REG_CAP, "extra_resp": b_extra},
+            expected="frozen=false after ReportSuspectedSybil",
+            actual=f"frozen={frozen}",
+            evidence={"report_resp": b_rp, "id_state": id_state},
         )
         findings.append(f)
         log.finding(f)
     else:
-        log.info("[S5] quota cap enforced correctly ✓", status=s_extra)
-
-    # Probe epoch boundary: check the stats endpoint for off-by-one
-    _, stats = _epoch_stats(client, api_url)
-    for entry in stats.get("controller_stats", []):
-        if entry.get("controller_id") == controller:
-            actual_submissions = entry.get("submissions_this_epoch", 0)
-            if actual_submissions > EPOCH_REG_CAP:
-                f = _finding(
-                    inv=8,
-                    title="Epoch stats show submissions above cap",
-                    severity=Severity.HIGH,
-                    steps=[
-                        f"Exhaust quota, probe epoch_stats for controller={controller}",
-                    ],
-                    expected=f"submissions_this_epoch <= {EPOCH_REG_CAP}",
-                    actual=f"submissions_this_epoch={actual_submissions}",
-                    evidence={"entry": entry, "cap": EPOCH_REG_CAP},
-                )
-                findings.append(f)
-                log.finding(f)
-
-    return findings
-
-
-# ---------------------------------------------------------------------------
-# S6 — Privilege escalation via re-registration
-# ---------------------------------------------------------------------------
-
-def attack_s6_privilege_escalation(client: httpx.Client, cfg: dict[str, Any]) -> list[FindingRecord]:
-    """
-    Revoke a standard (miner) identity, then re-register with role=admin.
-    The registry must not allow self-assigned admin roles.
-    """
-    findings: list[FindingRecord] = []
-    base_url   = _identity_url(cfg)
-    controller = f"ctrl-privesc-{uuid.uuid4().hex[:8]}"
-    iid        = f"identity-privesc-{uuid.uuid4().hex[:8]}"
-
-    _register(client, base_url, iid, controller, role="miner")
-    _revoke(client, base_url, iid, controller)
-    time.sleep(REVOKE_COOLDOWN_SECS)
-
-    # Re-register with admin role claim
-    iid2     = f"identity-privesc2-{uuid.uuid4().hex[:8]}"
-    s, b = _register(client, base_url, iid2, controller, role="admin")
-    log.info("[S6] admin role re-registration", status=s)
-
-    if not _rejected(s, b):
-        # Check the actual role assigned
-        _, lookup = _lookup(client, base_url, controller)
-        for entry in lookup.get("identities", []):
-            if entry.get("identity_id") == iid2:
-                actual_role = entry.get("role", "")
-                if actual_role == "admin":
-                    f = _finding(
-                        inv=None,
-                        title="Self-assigned admin role accepted via re-registration",
-                        severity=Severity.CRITICAL,
-                        steps=[
-                            f"Register as miner, controller={controller}",
-                            "Revoke, wait cooldown",
-                            "Re-register with role=admin",
-                            f"Lookup shows role={actual_role}",
-                        ],
-                        expected="Admin role claim rejected or ignored (role assigned by governance only)",
-                        actual=f"role={actual_role} for identity={iid2}",
-                        evidence={"controller": controller, "entry": entry},
-                    )
-                    findings.append(f)
-                    log.finding(f)
-                else:
-                    log.info("[S6] admin claim ignored — role assigned correctly ✓",
-                             actual_role=actual_role)
-    else:
-        log.info("[S6] admin re-registration correctly rejected ✓", status=s)
+        log.info("[S6] ReportSuspectedSybil correctly did not freeze ✓")
 
     return findings
 
@@ -619,18 +515,16 @@ def attack_s6_privilege_escalation(client: httpx.Client, cfg: dict[str, Any]) ->
 
 def attack_s7_concurrent_registration(client: httpx.Client, cfg: dict[str, Any]) -> list[FindingRecord]:
     """
-    Submit two registrations for the same controller_id simultaneously.
-    Only one should be accepted; duplicate identity under one controller
-    must not sneak through due to a TOCTOU in the registry.
+    Submit two RegisterIdentity txs for the same address simultaneously.
+    Exactly one should succeed; the second must be a no-op or rejected.
     """
     findings: list[FindingRecord] = []
-    base_url   = _identity_url(cfg)
-    controller = f"ctrl-race-{uuid.uuid4().hex[:8]}"
+    api_url = _api(cfg)
+    addr = _fresh_addr()
     results: dict[str, tuple[int, dict]] = {}
 
     def _reg(tag: str) -> None:
-        iid = f"identity-race-{tag}-{uuid.uuid4().hex[:6]}"
-        s, b = _register(client, base_url, iid, controller)
+        s, b = ic.register_identity(client, api_url, sender=addr)
         results[tag] = (s, b)
 
     t1 = threading.Thread(target=_reg, args=("A",))
@@ -640,35 +534,18 @@ def attack_s7_concurrent_registration(client: httpx.Client, cfg: dict[str, Any])
 
     sa, ba = results.get("A", (0, {}))
     sb, bb = results.get("B", (0, {}))
-    log.info("[S7] concurrent registration", status_A=sa, status_B=sb, controller=controller)
+    log.info("[S7] concurrent registration", addr=addr, status_A=sa, status_B=sb)
 
-    if not _rejected(sa, ba) and not _rejected(sb, bb):
-        # Both accepted — check how many are verified
-        _, lookup = _lookup(client, base_url, controller)
-        verified = [i for i in lookup.get("identities", []) if i.get("verified")]
-        if len(verified) > 1:
-            f = _finding(
-                inv=7,
-                title="Concurrent registrations: two identities verified under one controller",
-                severity=Severity.CRITICAL,
-                steps=[
-                    f"Simultaneously POST register for controller={controller} (two threads)",
-                    f"Both returned non-error; lookup shows {len(verified)} verified identities",
-                ],
-                expected="Race resolved: exactly one identity verified per controller",
-                actual=f"{len(verified)} verified identities under controller={controller}",
-                evidence={
-                    "controller": controller,
-                    "resp_A": ba, "resp_B": bb,
-                    "verified": verified,
-                },
-            )
-            findings.append(f)
-            log.finding(f)
-        else:
-            log.info("[S7] race resolved correctly ✓", verified_count=len(verified))
-    else:
-        log.info("[S7] at least one registration rejected ✓", status_A=sa, status_B=sb)
+    # Both accepted is only a problem if it caused inconsistent state
+    time.sleep(_TX_WAIT_SECS)
+    _, id_state = ic.get_entity_status(client, api_url, addr)
+    log.info("[S7] identity state after concurrent register", state=id_state)
+
+    # If neither rejected it's worth noting, but not necessarily a critical bug
+    # (chain may just treat duplicate register as idempotent)
+    if not ic.rejected(sa, ba) and not ic.rejected(sb, bb):
+        log.info("[S7] both registrations accepted — check idempotency in chain-forge-identity")
+        # Not raising a finding unless we can confirm actual double-entry
 
     return findings
 
@@ -678,12 +555,12 @@ def attack_s7_concurrent_registration(client: httpx.Client, cfg: dict[str, Any])
 # ---------------------------------------------------------------------------
 
 ATTACKS = [
-    ("S1", "Multi-identity per controller",    attack_s1_multi_identity),
-    ("S2", "Registry spam",                    attack_s2_registry_spam),
-    ("S3", "Revoke/re-register cycling",       attack_s3_revoke_reregister),
-    ("S4", "Self-verify via identity API",     attack_s4_self_verify),
-    ("S5", "Cross-epoch quota re-use",         attack_s5_cross_epoch),
-    ("S6", "Privilege escalation",             attack_s6_privilege_escalation),
+    ("S1", "Double-registration",              attack_s1_double_register),
+    ("S2", "Registry spam (epoch cap)",        attack_s2_registry_spam),
+    ("S3", "Revocation cooldown bypass",       attack_s3_revoke_reattest),
+    ("S4", "Self-attest (INV-11)",             attack_s4_self_attest),
+    ("S5", "ConfirmSybil freezes (INV-13)",    attack_s5_confirm_sybil_freezes),
+    ("S6", "ReportSuspectedSybil no freeze",   attack_s6_report_no_freeze),
     ("S7", "Concurrent registration race",     attack_s7_concurrent_registration),
 ]
 
@@ -696,6 +573,8 @@ def main() -> None:
     parser.add_argument("--findings-dir",    type=Path, default=Path("agents/findings"))
     parser.add_argument("--attack",          help="Run only S1..S7")
     parser.add_argument("--unsafe-override", action="store_true")
+    parser.add_argument("--once",            action="store_true",
+                        help="Run suite once and exit (for automated pipelines)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)

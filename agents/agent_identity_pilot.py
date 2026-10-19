@@ -54,7 +54,7 @@ from agents.identity_client import (
 log = StructuredLogger("agent_identity_pilot")
 
 # How long to wait for a tx to confirm (blocks at ~1 s/block in devnet)
-TX_CONFIRM_WAIT_SECS = 5
+TX_CONFIRM_WAIT_SECS = 6
 
 
 def _api(cfg: dict[str, Any]) -> str:
@@ -254,25 +254,45 @@ def attack_ip4_confirm_sybil_freeze(client: httpx.Client, cfg: dict[str, Any]) -
     ConfirmSybil on a verified entity.  Entity MUST be frozen immediately.
     Probe by checking entity_status.frozen == true and no further reward
     events are accepted for that entity.
+
+    Uses Bob as the target because Bob is a funded genesis account that can
+    pay gas.  Bob must already be registered (genesis includes him).
+    Alice is the attestation coordinator allowed to call ConfirmSybil.
+    We first ReverseSybil Bob (in case a prior run left him frozen) so we
+    start from a known unfrozen state.
     """
     findings: list[FindingRecord] = []
     api = _api(cfg)
-    entity_id     = f"entity-freeze-{uuid.uuid4().hex[:8]}"
-    subject_ctrl  = f"ctrl-subject-{uuid.uuid4().hex[:8]}"
-    attester_ctrl = f"ctrl-attester-{uuid.uuid4().hex[:8]}"
-    reporter_ctrl = f"ctrl-reporter-{uuid.uuid4().hex[:8]}"
 
-    # Establish attestation
+    # Well-known funded addresses from genesis
+    entity_id     = "qcb1bob"   # target — has genesis balance for gas
+    coordinator   = "qcb1alice" # attestation_coordinator per genesis
+
+    # --- Reset: if Bob is already frozen, unfreeze him first so this test
+    #     starts from a clean state regardless of prior runs.
+    _, prior_state = get_entity_status(client, api, entity_id)
+    if prior_state.get("frozen"):
+        log.info("[IP-4] Bob already frozen — ReverseSybil to reset state")
+        from agents.identity_client import reverse_sybil
+        reverse_sybil(client, api,
+                      entity_id=entity_id, authority_controller=coordinator)
+        _wait_confirm()
+
+    # Make sure Bob is registered (he is in genesis, but confirm)
+    _, pre = get_entity_status(client, api, entity_id)
+    log.info("[IP-4] Bob pre-state", state=pre)
+
+    # Alice attests Bob (may fail if already attested this epoch; ignore)
     attest_entity(client, api, entity_id=entity_id,
-                  subject_controller=subject_ctrl,
-                  attester_controller=attester_ctrl)
+                  subject_controller=entity_id,
+                  attester_controller=coordinator)
     _wait_confirm()
 
-    # ConfirmSybil
+    # ConfirmSybil — Alice is the coordinator
     s_cs, b_cs = confirm_sybil(
         client, api,
         entity_id=entity_id,
-        reporter_controller=reporter_ctrl,
+        reporter_controller=coordinator,
     )
     log.info("[IP-4] ConfirmSybil submitted", status=s_cs)
     _wait_confirm()
@@ -290,13 +310,13 @@ def attack_ip4_confirm_sybil_freeze(client: httpx.Client, cfg: dict[str, Any]) -
             title="Entity not frozen after ConfirmSybil confirmed",
             severity=Severity.CRITICAL,
             steps=[
-                f"AttestEntity entity_id={entity_id}",
-                f"ConfirmSybil entity_id={entity_id} reporter={reporter_ctrl}",
+                f"AttestEntity entity_id={entity_id} attester={coordinator}",
+                f"ConfirmSybil entity_id={entity_id} reporter={coordinator}",
                 f"Wait {TX_CONFIRM_WAIT_SECS}s — poll entity status",
             ],
             expected="frozen=true and sybil_confirmed=true after ConfirmSybil (INV-13)",
             actual=f"frozen={frozen}, sybil_confirmed={sybil_confirmed}",
-            evidence={"entity_id": entity_id, "status": b_stat},
+            evidence={"entity_id": entity_id, "confirm_resp": b_cs, "status": b_stat},
         ))
         log.finding(findings[-1])
     else:
@@ -388,23 +408,28 @@ def attack_ip5_report_no_freeze(client: httpx.Client, cfg: dict[str, Any]) -> li
 def attack_ip6_reverse_sybil_restores(client: httpx.Client, cfg: dict[str, Any]) -> list[FindingRecord]:
     """
     After ConfirmSybil, ReverseSybil MUST unfreeze the entity.
+
+    Uses Dave as the target — he's a funded genesis account.  We first ensure
+    Dave is frozen (ConfirmSybil if needed), then ReverseSybil and verify.
+    Alice is the attestation_coordinator allowed to call both.
     """
     findings: list[FindingRecord] = []
     api = _api(cfg)
-    entity_id      = f"entity-reverse-{uuid.uuid4().hex[:8]}"
-    subject_ctrl   = f"ctrl-subject-{uuid.uuid4().hex[:8]}"
-    attester_ctrl  = f"ctrl-attester-{uuid.uuid4().hex[:8]}"
-    reporter_ctrl  = f"ctrl-reporter-{uuid.uuid4().hex[:8]}"
-    authority_ctrl = f"ctrl-authority-{uuid.uuid4().hex[:8]}"
+    entity_id      = "qcb1dave"   # funded genesis account
+    coordinator    = "qcb1alice"  # attestation_coordinator per genesis
 
-    attest_entity(client, api, entity_id=entity_id,
-                  subject_controller=subject_ctrl,
-                  attester_controller=attester_ctrl)
-    _wait_confirm()
-    confirm_sybil(client, api, entity_id=entity_id, reporter_controller=reporter_ctrl)
-    _wait_confirm()
+    # Ensure Dave is frozen so we have something to reverse.
+    _, b_pre = get_entity_status(client, api, entity_id)
+    if not b_pre.get("frozen", False):
+        log.info("[IP-6] Dave not frozen — ConfirmSybil to set up reverse test")
+        attest_entity(client, api, entity_id=entity_id,
+                      subject_controller=entity_id,
+                      attester_controller=coordinator)
+        _wait_confirm()
+        confirm_sybil(client, api, entity_id=entity_id, reporter_controller=coordinator)
+        _wait_confirm()
 
-    # Verify frozen first
+    # Verify frozen before reversing
     _, b_frozen = get_entity_status(client, api, entity_id)
     if not b_frozen.get("frozen", False):
         log.info("[IP-6] entity not frozen after ConfirmSybil — skipping reverse test",
@@ -415,7 +440,7 @@ def attack_ip6_reverse_sybil_restores(client: httpx.Client, cfg: dict[str, Any])
     s_rev, b_rev = reverse_sybil(
         client, api,
         entity_id=entity_id,
-        authority_controller=authority_ctrl,
+        authority_controller=coordinator,
     )
     log.info("[IP-6] ReverseSybil submitted", status=s_rev)
     _wait_confirm()
@@ -432,7 +457,7 @@ def attack_ip6_reverse_sybil_restores(client: httpx.Client, cfg: dict[str, Any])
             steps=[
                 f"AttestEntity entity_id={entity_id}",
                 f"ConfirmSybil — entity frozen",
-                f"ReverseSybil authority={authority_ctrl}",
+                f"ReverseSybil authority={coordinator}",
                 f"Wait {TX_CONFIRM_WAIT_SECS}s — entity still frozen",
             ],
             expected="frozen=false after ReverseSybil (INV-13 appeal path)",
