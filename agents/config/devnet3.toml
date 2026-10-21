@@ -1,36 +1,33 @@
-# agents/config/devnet3.toml
-# 3-node devnet: Alice / Bob / Carol
-# Matches ports used in existing devnet genesis scripts.
-
 [nodes]
 rpc_urls = [
-    "http://127.0.0.1:26657",   # Alice
-    "http://127.0.0.1:26659",   # Bob
-    "http://127.0.0.1:26661",   # Carol
+    "http://127.0.0.1:8080",
+    "http://127.0.0.1:8081",
+    "http://127.0.0.1:8082",
 ]
 api_urls = [
-    "http://127.0.0.1:1317",    # Alice REST
-    "http://127.0.0.1:1318",    # Bob REST
-    "http://127.0.0.1:1319",    # Carol REST
+    "http://127.0.0.1:8080",
+    "http://127.0.0.1:8081",
+    "http://127.0.0.1:8082",
 ]
 
 [scheduler]
 url = "http://127.0.0.1:8080"
 
 [identity]
-url = "http://127.0.0.1:9090"
+url = "http://127.0.0.1:8080"
 
 [accounts]
-alice   = "qcb1alice000000000000000000000000000000000"
-bob     = "qcb1bob00000000000000000000000000000000000"
-carol   = "qcb1carol0000000000000000000000000000000000"
-faucet  = "qcb1faucet000000000000000000000000000000000"
+alice  = "qcb1alice"
+bob    = "qcb1bob"
+carol  = "qcb1carol"
+dave   = "qcb1dave"
+faucet = "qcb1alice"
 
 [timing]
-poll_interval_secs      = 5
-finding_flush_interval  = 30
-gossip_replay_window    = 120   # seconds; stale threshold in Change Set R/S
+poll_interval_secs     = 5
+finding_flush_interval = 30
+gossip_replay_window   = 120
 
 [limits]
-max_flood_msgs          = 500
-max_sybil_identities    = 20
+max_flood_msgs       = 500
+max_sybil_identities = 20

@@ -55,7 +55,7 @@ log = StructuredLogger("agent1_tx_fuzzer")
 U64_MAX = 2**64 - 1
 
 # [ASSUMPTION] Tendermint-compatible broadcast endpoint
-BROADCAST_ENDPOINT = "/broadcast_tx_sync"
+BROADCAST_ENDPOINT = "/api/tx"
 
 # [ASSUMPTION] Block gas cap — read from genesis or node config if exposed
 BLOCK_GAS_CAP = 10_000_000
@@ -82,25 +82,23 @@ _WRONG_KEY       = "fe" * (_VALID_KEY_HEX_LEN // 2)
 
 @dataclass
 class TxEnvelope:
-    chain_id:  Any = "devnet"          # str normally
-    nonce:     Any = 1                 # u64 normally
-    sender:    Any = ""                # bech32 qcb1... normally
-    msg_type:  Any = "Transfer"        # str normally
-    payload:   Any = field(default_factory=dict)
-    gas_limit: Any = 100_000           # u64 normally
-    signature: Any = _PLACEHOLDER_SIG  # hex str normally
-    pub_key:   Any = _PLACEHOLDER_KEY  # hex str normally
+    id:            Any = field(default_factory=lambda: str(uuid.uuid4()))
+    sender:        Any = ""
+    nonce:         Any = 1
+    body:          Any = field(default_factory=dict)
+    gas_limit:     Any = 100_000
+    signature:     Any = field(default_factory=list)
+    pq_signatures: Any = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
-            "chain_id":  self.chain_id,
-            "nonce":     self.nonce,
-            "sender":    self.sender,
-            "msg_type":  self.msg_type,
-            "payload":   self.payload,
-            "gas_limit": self.gas_limit,
-            "signature": self.signature,
-            "pub_key":   self.pub_key,
+            "id":            self.id,
+            "sender":        self.sender,
+            "nonce":         self.nonce,
+            "body":          self.body,
+            "gas_limit":     self.gas_limit,
+            "signature":     self.signature,
+            "pq_signatures": self.pq_signatures,
         }
 
     def encode(self) -> dict:
@@ -111,7 +109,7 @@ class TxEnvelope:
             raw = borsh_serialize(self.as_dict())
             return {"tx": base64.b64encode(raw).decode()}
         """
-        return {"tx": self.as_dict()}
+        return self.as_dict()  # POST /api/tx takes the tx dict directly
 
     def mutate(self, **overrides: Any) -> "TxEnvelope":
         d = self.as_dict()
@@ -121,14 +119,12 @@ class TxEnvelope:
 
 def _base_tx(cfg: dict[str, Any]) -> TxEnvelope:
     return TxEnvelope(
-        chain_id  = "devnet",
-        nonce     = 1,
-        sender    = cfg["accounts"]["alice"],
-        msg_type  = "Transfer",
-        payload   = {"recipient": cfg["accounts"]["bob"], "amount": 1},
-        gas_limit = 100_000,
-        signature = _PLACEHOLDER_SIG,
-        pub_key   = _PLACEHOLDER_KEY,
+        sender        = cfg["accounts"]["alice"],
+        nonce         = 1,
+        body          = {"Transfer": {"to": cfg["accounts"]["bob"], "denom": "uqcb", "amount": 1}},
+        gas_limit     = 100_000,
+        signature     = [],
+        pq_signatures = [],
     )
 
 
@@ -168,20 +164,16 @@ def _check_tx_rejected(status: int, body: dict) -> bool:
     """
     if status in (400, 401, 403, 422):
         return True
-    if status == 200:
-        code = (
-            body.get("check_tx", {}).get("code")
-            or body.get("result", {}).get("check_tx", {}).get("code")
-            or body.get("code")
-        )
-        if code not in (None, 0):
-            return True
+    if body.get("status") == "error":
+        return True
+    if status == 200 and body.get("code") not in (None, 0):
+        return True
     return False
 
 
 def _node_alive(client: httpx.Client, node_url: str, timeout: float = 5.0) -> bool:
     try:
-        r = client.get(f"{node_url}/status", timeout=timeout)
+        r = client.get(f"{node_url}/api/status", timeout=timeout)
         return r.status_code == 200
     except Exception:
         return False
@@ -312,16 +304,18 @@ def attack_f2_balance(client: httpx.Client, cfg: dict[str, Any]) -> list[Finding
         balance = 10_000_000
 
     cases: list[tuple[str, TxEnvelope]] = [
-        ("amount=0",              base.mutate(payload={"recipient": bob, "amount": 0})),
-        ("amount=balance+1",      base.mutate(payload={"recipient": bob, "amount": balance + 1})),
-        ("amount=U64_MAX",        base.mutate(payload={"recipient": bob, "amount": U64_MAX})),
-        ("amount=-1",             base.mutate(payload={"recipient": bob, "amount": -1})),
-        ("amount=float",          base.mutate(payload={"recipient": bob, "amount": 0.5})),
-        ("recipient=sender",      base.mutate(payload={"recipient": alice, "amount": 1})),
-        ("recipient=empty",       base.mutate(payload={"recipient": "", "amount": 1})),
-        ("recipient=not-bech32",  base.mutate(payload={"recipient": "0xdeadbeef", "amount": 1})),
-        ("recipient=null",        base.mutate(payload={"recipient": None, "amount": 1})),
-        ("no-recipient-field",    base.mutate(payload={"amount": 1})),
+        ("amount=0",             base.mutate(body={"Transfer": {"to": bob, "denom": "uqcb", "amount": 0}})),
+        ("amount=balance+1",     base.mutate(body={"Transfer": {"to": bob, "denom": "uqcb", "amount": balance + 1}})),
+        ("amount=U64_MAX",       base.mutate(body={"Transfer": {"to": bob, "denom": "uqcb", "amount": U64_MAX}})),
+        ("amount=-1",            base.mutate(body={"Transfer": {"to": bob, "denom": "uqcb", "amount": -1}})),
+        ("amount=float",         base.mutate(body={"Transfer": {"to": bob, "denom": "uqcb", "amount": 0.5}})),
+        ("to=sender",            base.mutate(body={"Transfer": {"to": alice, "denom": "uqcb", "amount": 1}})),
+        ("to=empty",             base.mutate(body={"Transfer": {"to": "", "denom": "uqcb", "amount": 1}})),
+        ("to=not-bech32",        base.mutate(body={"Transfer": {"to": "0xdeadbeef", "denom": "uqcb", "amount": 1}})),
+        ("to=null",              base.mutate(body={"Transfer": {"to": None, "denom": "uqcb", "amount": 1}})),
+        ("denom=unknown",        base.mutate(body={"Transfer": {"to": bob, "denom": "fakecoin", "amount": 1}})),
+        ("denom=empty",          base.mutate(body={"Transfer": {"to": bob, "denom": "", "amount": 1}})),
+        ("no-to-field",          base.mutate(body={"Transfer": {"denom": "uqcb", "amount": 1}})),
     ]
     return _fuzz_matrix(client, node, "F2-balance", cases)
 
@@ -355,17 +349,18 @@ def attack_f4_chain_id(client: httpx.Client, cfg: dict[str, Any]) -> list[Findin
     node = cfg["nodes"]["rpc_urls"][0]
     base = _base_tx(cfg)
 
+    bob = cfg["accounts"]["bob"]
     cases: list[tuple[str, TxEnvelope]] = [
-        ("chain_id=empty",        base.mutate(chain_id="")),
-        ("chain_id=mainnet",      base.mutate(chain_id="qcb-mainnet-1")),
-        ("chain_id=other-devnet", base.mutate(chain_id="devnet-999")),
-        ("chain_id=integer",      base.mutate(chain_id=12345)),
-        ("chain_id=null",         base.mutate(chain_id=None)),
-        ("chain_id=nul-inject",   base.mutate(chain_id="devnet\x00injected")),
-        ("chain_id=256-chars",    base.mutate(chain_id="x" * 256)),
-        ("chain_id=array",        base.mutate(chain_id=["devnet"])),
+        ("body=unknown-variant",  base.mutate(body={"ExplodeChain": {}})),
+        ("body=null",             base.mutate(body=None)),
+        ("body=empty",            base.mutate(body={})),
+        ("body=string",           base.mutate(body="Transfer")),
+        ("body=integer",          base.mutate(body=42)),
+        ("body=two-variants",     base.mutate(body={"Transfer": {"to": bob, "denom": "uqcb", "amount": 1}, "Burn": {}})),
+        ("sender=empty",          base.mutate(sender="")),
+        ("sender=null",           base.mutate(sender=None)),
     ]
-    findings = _fuzz_matrix(client, node, "F4-chain-id", cases, inv=9)
+    findings = _fuzz_matrix(client, node, "F4-body-variants", cases, inv=9)
 
     if not _node_alive(client, node):
         f = _finding(
@@ -400,24 +395,21 @@ def attack_f5_signature(client: httpx.Client, cfg: dict[str, Any]) -> list[Findi
     _double_sig = _PLACEHOLDER_SIG + "cc" * (_VALID_SIG_HEX_LEN // 2)
 
     cases: list[tuple[str, TxEnvelope]] = [
-        ("sig=zeroed",         base.mutate(signature=_ZERO_SIG)),
-        ("sig=truncated-half", base.mutate(signature=_truncated_sig)),
-        ("sig=double-length",  base.mutate(signature=_double_sig)),
-        ("sig=bit-flip-byte0", base.mutate(signature=_bitflip)),
-        ("sig=wrong-key-pair", base.mutate(signature=_WRONG_KEY_SIG, pub_key=_WRONG_KEY)),
-        ("sig=empty-string",   base.mutate(signature="")),
+        ("sig=garbage",        base.mutate(signature=[0xff]*64)),
+        ("sig=truncated-half", base.mutate(signature=[0xab]*32)),
+        ("sig=double-length",  base.mutate(signature=[0xab]*1000)),
+        ("sig=bit-flip-byte0", base.mutate(signature=[0x01]+[0xab]*63)),
+        ("sig=wrong-key-pair", base.mutate(signature=[0xef]*64)),
+        ("sig=empty-string",   base.mutate(signature="not-a-list")),
         ("sig=null",           base.mutate(signature=None)),
         ("sig=non-hex",        base.mutate(signature="GGGG" * 100)),
         ("sig=integer",        base.mutate(signature=12345)),
-        ("pubkey=zeroed",      base.mutate(pub_key=_ZERO_KEY)),
-        ("pubkey=truncated",   base.mutate(pub_key=_truncated_key)),
-        ("pubkey=null",        base.mutate(pub_key=None)),
-        ("pubkey=mismatch",    base.mutate(pub_key=_WRONG_KEY)),   # key doesn't match sig
+        ("pubkey=zeroed",      base.mutate(pq_signatures=["garbage"])),
+        ("pubkey=truncated",   base.mutate(pq_signatures=[None])),
+        ("pubkey=null",        base.mutate(pq_signatures=None)),
+        ("pubkey=mismatch",    base.mutate(pq_signatures=["ff"*1000])),   # key doesn't match sig
         # Sender/pubkey mismatch: pubkey is valid-length but derives to a different address
-        ("sender-pubkey-mismatch", base.mutate(
-            sender=cfg["accounts"]["bob"],    # bob's address
-            pub_key=_PLACEHOLDER_KEY,          # alice's key (mismatched)
-        )),
+        ("sender=unknown",         base.mutate(sender="qcb1notarealaddress")),
     ]
     return _fuzz_matrix(client, node, "F5-signature", cases)
 
@@ -447,17 +439,14 @@ def attack_f6_unknown_variant(client: httpx.Client, cfg: dict[str, Any]) -> list
         return d
 
     cases: list[tuple[str, TxEnvelope]] = [
-        ("msg_type=unknown",       base.mutate(msg_type="ExplodeChain")),
-        ("msg_type=empty",         base.mutate(msg_type="")),
-        ("msg_type=null",          base.mutate(msg_type=None)),
-        ("msg_type=integer",       base.mutate(msg_type=42)),
-        ("payload=null",           base.mutate(payload=None)),
-        ("payload=empty-dict",     base.mutate(payload={})),
-        ("payload=list",           base.mutate(payload=[1, 2, 3])),
-        ("payload=string",         base.mutate(payload="not-a-dict")),
-        ("payload=depth-500",      base.mutate(payload=_deep(500))),
-        ("payload=10k-keys",       base.mutate(payload={f"k{i}": "v" for i in range(10_000)})),
-        ("extra-top-level-fields", _ExtraFieldTx(**base.as_dict())),
+        ("body=unknown-variant",   base.mutate(body={"ExplodeChain": {}})),
+        ("body=empty",             base.mutate(body={})),
+        ("body=null",              base.mutate(body=None)),
+        ("body=integer",           base.mutate(body=42)),
+        ("body=string",            base.mutate(body="Transfer")),
+        ("body=depth-500",         base.mutate(body={"Transfer": {"nested": _deep(500)}})),
+        ("body=10k-keys",          base.mutate(body={f"k{i}": "v" for i in range(10_000)})),
+        ("body=two-variants",      base.mutate(body={"Transfer": {"to": bob, "denom": "uqcb", "amount": 1}, "Burn": {"denom": "uqcb", "amount": 1}})),
     ]
     return _fuzz_matrix(client, node, "F6-variant", cases)
 
@@ -514,10 +503,11 @@ def attack_f8_exhaustion(client: httpx.Client, cfg: dict[str, Any]) -> list[Find
     bob  = cfg["accounts"]["bob"]
 
     cases: list[tuple[str, TxEnvelope]] = [
-        ("memo=1MB",        base.mutate(payload={"recipient": bob, "amount": 1, "memo": "A" * 1_000_000})),
-        ("payload=10k-keys", base.mutate(payload={f"key_{i}": "v" for i in range(10_000)})),
-        ("memo=unicode-bomb", base.mutate(payload={"recipient": bob, "amount": 1, "memo": "\u0000" * 50_000})),
-        ("sig=10MB",        base.mutate(signature="ab" * 5_000_000)),
+        ("body=1MB-string",    base.mutate(body={"Transfer": {"to": bob, "denom": "uqcb", "amount": 1, "memo": "A" * 1_000_000}})),
+        ("body=10k-keys",      base.mutate(body={f"key_{i}": "v" for i in range(10_000)})),
+        ("body=unicode-bomb",  base.mutate(body={"Transfer": {"to": bob, "denom": "A" * 50_000, "amount": 1}})),
+        ("sig=large",          base.mutate(signature=[0xab] * 100_000)),
+        ("id=huge",            base.mutate(id="x" * 1_000_000)),
     ]
     findings.extend(_fuzz_matrix(client, node, "F8-exhaustion", cases, inv=8))
 

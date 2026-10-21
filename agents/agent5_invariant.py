@@ -488,7 +488,7 @@ def run_monitor(
     run_once: bool,
 ) -> None:
     state   = MonitorState()
-    checker = ExtendedInvariantChecker(config, state, findings_dir)
+    checker = InvariantChecker(config, state, findings_dir)
     total_findings = 0
 
     with httpx.Client() as client:

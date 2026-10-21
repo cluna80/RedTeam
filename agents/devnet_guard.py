@@ -40,16 +40,11 @@ def _check_forbidden_url(url: str) -> None:
 
 
 def _check_chain_id(node_url: str, timeout: float = 5.0) -> str:
-    """Query /api/status and return chain_id; raise if mainnet.
-
-    chain-forge-node serves GET /api/status and returns a NodeStatus JSON
-    object with chain_id at the top level:
-        {"chain_id": "qcb-devnet-3node", "height": 5, "is_running": true, …}
-    """
+    """Query /status and return chain_id; raise if mainnet."""
     try:
         r = httpx.get(f"{node_url}/api/status", timeout=timeout)
         r.raise_for_status()
-        chain_id: str = r.json()["chain_id"]
+        chain_id: str = r.json().get("chain_id") or r.json()["result"]["node_info"]["network"]
     except Exception as exc:
         raise MainnetGuardError(
             f"Could not verify chain_id from {node_url}: {exc}"
@@ -59,8 +54,7 @@ def _check_chain_id(node_url: str, timeout: float = 5.0) -> str:
         raise MainnetGuardError(
             f"Chain ID {chain_id!r} is a mainnet identifier. Aborting."
         )
-    _DEVNET_PREFIXES = ("devnet", "testnet", "localnet", "qcb-devnet", "qcb-testnet")
-    if not any(chain_id.startswith(p) for p in _DEVNET_PREFIXES):
+    if not (chain_id.startswith("devnet") or chain_id.startswith("testnet") or chain_id.startswith("localnet") or chain_id.startswith("qcb-devnet")):
         raise MainnetGuardError(
             f"Chain ID {chain_id!r} is not a recognised devnet/testnet prefix. "
             "Add --unsafe-override only if you are absolutely sure this is a test network."
@@ -90,13 +84,9 @@ def assert_devnet(config: dict[str, Any], unsafe_override: bool = False) -> str:
     """
     _check_env()
 
-    # Prefer api_urls for the status check (chain-forge-node serves /api/status
-    # on the API port, not on a separate RPC port).  Fall back to rpc_urls so
-    # existing configs that only specify rpc_urls continue to work.
-    nodes_cfg = config.get("nodes", {})
-    node_urls: list[str] = nodes_cfg.get("api_urls") or nodes_cfg.get("rpc_urls", [])
+    node_urls: list[str] = config.get("nodes", {}).get("rpc_urls", [])
     if not node_urls:
-        raise MainnetGuardError("No node API/RPC URLs in config — cannot verify devnet.")
+        raise MainnetGuardError("No node RPC URLs in config — cannot verify devnet.")
 
     for url in node_urls:
         _check_forbidden_url(url)
