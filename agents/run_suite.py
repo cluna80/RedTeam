@@ -38,7 +38,7 @@ _AGENT_SCRIPTS = {
     8: "agent_identity_pilot.py",    # Phase A–D attestation-guard / identity pilot
 }
 
-_DEFAULT_ORDER = [5, 7, 2, 3, 1, 4, 8]   # 6 runs separately via --propose-patches; 8=identity pilot
+_DEFAULT_ORDER = [5, 7, 8, 2, 3, 1, 4, 8]   # 6 runs separately via --propose-patches; 8=identity pilot
 
 
 def _run_agent(
