@@ -226,3 +226,43 @@ Add to your CI pipeline (after devnet launch):
       --agents 5 --once
   # Fails CI if any invariant is violated
 ```
+
+---
+
+## First live devnet red-team run — 2026-10-21
+
+### Environment
+- 3-node devnet: Alice/Bob/Dave, `chain-forge-node` v0.1.0
+- chain_id: `qcb-devnet-3node`
+- Agent 1 (TxFuzzer) against `POST /api/tx`
+
+### Results: 27 findings → 14 remaining after fix
+
+| Category | Initial | After fix | Status |
+|----------|---------|-----------|--------|
+| F2 field validation | 8 | 4 | Partially fixed |
+| F3 gas cap | 4 | 1 | Mostly fixed |
+| F4 body variants | 1 | 0 | ✅ Closed |
+| F5 signature | 8 | 3 | Partially fixed |
+| F1 nonce | 4 | 4 | Needs execution-layer state |
+| F7 replay | 1 | 1 | Needs tx hash dedup in state |
+| F8 unicode bomb | 1 | 1 | Open |
+
+### Root cause (fixed)
+`require_signatures: false` in devnet genesis caused the entire
+ingress path to skip all validation — not just sig crypto.
+
+### Fix applied to chain-forge-engine
+`check_tx()` added to `chain-forge-execution/src/lib.rs`.
+Runs unconditionally before any other gate. Enforces:
+- sender non-empty
+- gas_limit > 0 and <= block_gas_limit
+- Ed25519 signature, if present, exactly 64 bytes
+- ML-DSA-65 pq_signatures, if present, exactly 6586 hex chars
+- Transfer: amount > 0, to non-empty with qcb1 prefix, denom non-empty
+- Payload within max_tx_bytes (65536)
+
+### Remaining 14 findings
+All require account state and belong at execution layer:
+nonce ordering, balance checks, tx replay dedup, sender→pubkey binding,
+known denom validation, unicode denom handling.
