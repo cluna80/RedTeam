@@ -123,7 +123,7 @@ log = StructuredLogger("agent8_identity_pilot")
 # ---------------------------------------------------------------------------
 
 # [ASSUMPTION] Transaction broadcast endpoint
-TX_ENDPOINT = "/tx"
+TX_ENDPOINT = "/api/tx"
 
 # [ASSUMPTION] DIS challenge endpoint
 DIS_CHALLENGE_ENDPOINT = "/api/dis/challenge"
@@ -223,7 +223,7 @@ def _broadcast_tx(
     """
     tx = {
         "chain_id":  chain_id,
-        "nonce":     int(time.time()) % 1_000_000,
+        "nonce":     int(time.time()) % 1_000_000 + 300_000,
         "sender":    sender,
         "msg_type":  tx_type,
         "payload":   payload,
@@ -231,7 +231,7 @@ def _broadcast_tx(
         "signature": signature,
         "pub_key":   "cd" * 32,
     }
-    return _post(client, f"{node_url}{TX_ENDPOINT}", {"tx": tx})
+    return _post(client, f"{node_url}{TX_ENDPOINT}", tx)
 
 
 def _identity_status(
@@ -395,10 +395,10 @@ def attack_i3_sybil_confirm_no_quorum(
         client, node, TX_CONFIRM_SYBIL,
         payload={
             "target":   carol,
-            "reporter": alice,
+            "reporter": bob,
             "evidence": "fake-sybil-evidence",
         },
-        sender=alice,  # alice is not a coordinator
+        sender=bob,  # bob is not the coordinator (alice is)
     )
     log.info(f"[I3] ConfirmSybil without coordinator quorum", status=s)
 
@@ -443,11 +443,11 @@ def attack_i4_reverse_sybil_unauthorized(
     s, b = _broadcast_tx(
         client, node, TX_REVERSE_SYBIL,
         payload={
-            "target":     bob,
-            "reverser":   alice,
+            "target":     alice,
+            "reverser":   bob,
             "justification": "unauthorized reversal attempt",
         },
-        sender=alice,
+        sender=bob,
     )
     log.info(f"[I4] ReverseSybil without coordinator auth", status=s)
 
@@ -987,8 +987,8 @@ def attack_i13_coordinator_probe(
     """
     findings: list[FindingRecord] = []
     node  = cfg["nodes"]["api_urls"][0]
-    alice = cfg["accounts"]["alice"]  # ordinary account, not coordinator
-    bob   = cfg["accounts"]["bob"]
+    alice = cfg["accounts"]["alice"]  # alice IS the coordinator in genesis
+    bob   = cfg["accounts"]["bob"]   # bob is NOT the coordinator
 
     gated: dict[str, bool] = {}
     for tx_type, payload in [
