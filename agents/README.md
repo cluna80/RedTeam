@@ -266,3 +266,21 @@ Runs unconditionally before any other gate. Enforces:
 All require account state and belong at execution layer:
 nonce ordering, balance checks, tx replay dedup, sender→pubkey binding,
 known denom validation, unicode denom handling.
+
+### Round 3 results (after commit b7ecd22)
+
+27 → 8 findings across 3 fix rounds. 19 closed.
+
+| Category | R1 | R2 | R3 | Status |
+|----------|----|----|----|--------|
+| F3 Gas   | 4  | 1  | 0  | ✅ Clean |
+| F4 Body  | 1  | 0  | 0  | ✅ Clean |
+| F6       | 0  | 0  | 0  | ✅ Clean |
+| F7 Replay| 1  | 1  | 0  | ✅ Clean |
+| F8 Exhaustion | 1 | 1 | 0 | ✅ Clean |
+| F2 Balance | 8 | 4 | 2 | Stateful — execution layer |
+| F1 Nonce | 4  | 4  | 3  | Stateful — nonce tracking |
+| F5 Sig/pubkey | 8 | 3 | 3 | Stateful — key binding |
+
+Remaining 8 require account state and belong at execution layer.
+Next: run agent5 (invariants) and agent7 (consensus) against live devnet.
