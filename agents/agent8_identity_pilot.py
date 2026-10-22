@@ -994,8 +994,8 @@ def attack_i11_max_uses_exhaustion(
         es, eb = _post(client, f"{vendor_url}/enroll",
                        {"wallet_id": holder_wallet_id, "vendor_id": vendor_id,
                         "public_key_hex": holder_pk,
-                        "signature_hex": enroll_sig["signature_hex"]})
-        if es not in (200, 201):
+                        "nonce_signature_hex": enroll_sig["signature_hex"]})
+        if eb.get("status") != "enrolled":
             log.warn(f"[I11] NOT_TESTED — enrollment failed: {es} {eb}")
             return findings
         log.info("[I11] holder enrolled", status=es)
@@ -1051,22 +1051,25 @@ def attack_i11_max_uses_exhaustion(
                 results.append((cs, cb))
                 continue
 
-            # Use every field exactly as the server returned them — the server
-            # stored the transcript it computed; the agent must sign that exact bytes.
+            # /challenge returns {"status":"ok","challenge":{...}} — unwrap inner object
+            inner = cb.get("challenge", cb)
+
+            # Use every field exactly as the server stored them — the server
+            # computed canonical_request at issuance; agent must sign those exact bytes.
             transcript_hex = _run_helper(
                 helper, "canonical-request",
                 stdin=json.dumps({
-                    "suite_id":     cb.get("suite_id", 1),
-                    "rp_id":        cb.get("rp_id", vendor_id),
-                    "rp_origin":    cb["rp_origin"],   # must match server's stored value
-                    "challenge_id": cb["challenge_id"],
-                    "nonce":        cb["nonce"],
-                    "issued_at":    cb["issued_at"],
-                    "expires_at":   cb["expires_at"],
-                    "resource_id":  cb.get("resource_id", "doc-001"),
-                    "action":       cb.get("action", "read"),
-                    "scopes":       cb.get("scopes", ["document:read"]),
-                    "policy_id":    cb.get("policy_id", "v1"),
+                    "suite_id":     inner.get("suite_id", 1),
+                    "rp_id":        inner.get("rp_id", vendor_id),
+                    "rp_origin":    inner["rp_origin"],
+                    "challenge_id": inner["challenge_id"],
+                    "nonce":        inner["nonce"],
+                    "issued_at":    inner["issued_at"],
+                    "expires_at":   inner["expires_at"],
+                    "resource_id":  inner.get("resource_id", "doc-001"),
+                    "action":       inner.get("action", "read"),
+                    "scopes":       inner.get("scopes", ["document:read"]),
+                    "policy_id":    inner.get("policy_id", "v1"),
                 }),
             )["transcript_hex"]
             agent_sig = _run_helper(helper, "sign-transcript",
@@ -1075,7 +1078,7 @@ def attack_i11_max_uses_exhaustion(
             vs, vb = _post(client, f"{vendor_url}{DIS_VENDOR_VERIFY_DELEGATED}", {
                 "wallet_id":          holder_wallet_id,
                 "vendor_id":          vendor_id,
-                "challenge":          cb,
+                "challenge":          inner,
                 "delegation_chain":   [delegation_link],
                 "agent_public_key_hex": agent_pk,
                 "agent_signature_hex":  agent_sig["signature_hex"],
