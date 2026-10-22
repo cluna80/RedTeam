@@ -35,7 +35,7 @@ _AGENT_SCRIPTS = {
     5: "agent5_invariant.py",
     7: "agent7_consensus.py",
     6: "agent6_patch.py",
-    8: "agent_identity_pilot.py",    # Phase A–D attestation-guard / identity pilot
+    8: "agent8_identity_pilot.py",    # Phase A–D attestation-guard / identity pilot
 }
 
 _DEFAULT_ORDER = [5, 7, 8, 2, 3, 1, 4, 8]   # 6 runs separately via --propose-patches; 8=identity pilot
