@@ -4,3 +4,6 @@ deploy_*.sh
 patch_*.sh
 install_*.sh
 agents/findings/
+*.code-workspace
+commit_*.sh
+dis_*_test.json
