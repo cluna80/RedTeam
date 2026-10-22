@@ -1051,19 +1051,21 @@ def attack_i11_max_uses_exhaustion(
                 results.append((cs, cb))
                 continue
 
+            # Use every field exactly as the server returned them — the server
+            # stored the transcript it computed; the agent must sign that exact bytes.
             transcript_hex = _run_helper(
                 helper, "canonical-request",
                 stdin=json.dumps({
-                    "suite_id":   cb.get("suite_id", 1),
-                    "rp_id":      vendor_id,
-                    "rp_origin":  f"https://{vendor_id}.example",
+                    "suite_id":     cb.get("suite_id", 1),
+                    "rp_id":        cb.get("rp_id", vendor_id),
+                    "rp_origin":    cb["rp_origin"],   # must match server's stored value
                     "challenge_id": cb["challenge_id"],
                     "nonce":        cb["nonce"],
-                    "issued_at":    cb.get("issued_at", now_ts),
-                    "expires_at":   cb.get("expires_at", exp_ts),
-                    "resource_id":  "doc-001",
-                    "action":       "read",
-                    "scopes":       ["document:read"],
+                    "issued_at":    cb["issued_at"],
+                    "expires_at":   cb["expires_at"],
+                    "resource_id":  cb.get("resource_id", "doc-001"),
+                    "action":       cb.get("action", "read"),
+                    "scopes":       cb.get("scopes", ["document:read"]),
                     "policy_id":    cb.get("policy_id", "v1"),
                 }),
             )["transcript_hex"]
