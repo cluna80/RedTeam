@@ -31,3 +31,10 @@ gossip_replay_window   = 120
 [limits]
 max_flood_msgs       = 500
 max_sybil_identities = 20
+
+# DIS vendor server — separate service from the blockchain nodes.
+# Set vendor_url to wherever dis-vendor-server is listening.
+# I9/I10/I11/I12 tests are NOT_TESTED when this section is absent.
+[dis]
+vendor_url = "http://127.0.0.1:3000"
+vendor_id  = "devnet"

@@ -30,3 +30,25 @@ url = "http://127.0.0.1:8080"
 [identity]
 # Identity pilot endpoint on Alice (all nodes share genesis state)
 url = "http://127.0.0.1:8080"
+
+[accounts]
+alice  = "qcb1alice"
+bob    = "qcb1bob"
+carol  = "qcb1carol"
+dave   = "qcb1dave"
+faucet = "qcb1alice"
+
+[timing]
+poll_interval_secs     = 5
+finding_flush_interval = 30
+gossip_replay_window   = 120
+
+[limits]
+max_flood_msgs       = 500
+max_sybil_identities = 20
+
+# DIS vendor server — separate service from the blockchain nodes.
+# Start with: cargo run -p dis-vendor-server (default port 3000)
+[dis]
+vendor_url = "http://127.0.0.1:3000"
+vendor_id  = "devnet"
