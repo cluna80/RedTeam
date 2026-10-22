@@ -1196,7 +1196,7 @@ def attack_i12_human_approval_bypass(
         "agent_signature_hex":  "ab" * 4,
         # no human_approval_token field
     })
-    log.info(f"[I12] human-approval bypass attempt", status=s, msg=b.get("message", ""))
+    log.info(f"[I12] human-approval bypass attempt", status=s, response_msg=b.get("message", ""))
 
     msg = b.get("message", "").lower()
     if s == 403 and any(kw in msg for kw in ("human", "approval", "approved")):
