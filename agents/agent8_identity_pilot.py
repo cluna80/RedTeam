@@ -955,8 +955,8 @@ def attack_i11_max_uses_exhaustion(
     import shutil
     _here = Path(__file__).parent
     _bin_candidates = [
-        Path("/home/user/chain-forge-engine/target/release/dis-test-helper"),
-        _here / "../../chain-forge-engine/target/release/dis-test-helper",
+        Path("/workspaces/chain-forge-engine/target/debug/dis-test-helper"),
+        _here / "../../chain-forge-engine/target/debug/dis-test-helper",
         Path(shutil.which("dis-test-helper") or ""),
     ]
     helper = next((str(p) for p in _bin_candidates if p.exists()), None)
@@ -974,12 +974,15 @@ def attack_i11_max_uses_exhaustion(
         holder_pk = holder["public_key_hex"]
         holder_sk = holder["secret_key_hex"]
         agent_pk  = agent["public_key_hex"]
+        run_id = int(time.time())
+        holder_wallet = f"i11-holder-{run_id}"
+        agent_wallet  = f"i11-agent-{run_id}"
 
         # ------------------------------------------------------------------ #
         # 2. Enroll the holder on the DIS vendor server                       #
         # ------------------------------------------------------------------ #
         _, ec = _post(client, f"{vendor_url}/enroll/challenge",
-                      {"wallet_id": "i11-holder", "vendor_id": vendor_id,
+                      {"wallet_id": holder_wallet, "vendor_id": vendor_id,
                        "public_key_hex": holder_pk})
         nonce_str: str
         if isinstance(ec.get("nonce"), list):
@@ -989,9 +992,9 @@ def attack_i11_max_uses_exhaustion(
         enroll_sig = _run_helper(helper, "sign-nonce", "--sk", holder_sk,
                                  "--nonce", nonce_str)
         es, eb = _post(client, f"{vendor_url}/enroll",
-                       {"wallet_id": "i11-holder", "vendor_id": vendor_id,
+                       {"wallet_id": holder_wallet, "vendor_id": vendor_id,
                         "public_key_hex": holder_pk,
-                        "signature_hex": enroll_sig["signature_hex"]})
+                        "nonce_signature_hex": enroll_sig["signature_hex"]})
         if es not in (200, 201):
             log.warn(f"[I11] NOT_TESTED — enrollment failed: {es} {eb}")
             return findings
@@ -1028,6 +1031,9 @@ def attack_i11_max_uses_exhaustion(
             "signature":            del_sig["signature_hex"],
         }
 
+        # Agent does not need to be enrolled — only the holder (root delegator)
+        # must be enrolled. The agent key and sig travel as separate fields.
+
         results: list[tuple[int, dict]] = []
 
         # ------------------------------------------------------------------ #
@@ -1035,8 +1041,8 @@ def attack_i11_max_uses_exhaustion(
         # ------------------------------------------------------------------ #
         for use_num in range(1, 4):
             cs, cb = _post(client, f"{vendor_url}/challenge",
-                           {"wallet_id": "i11-agent", "vendor_id": vendor_id,
-                            "public_key_hex": agent_pk,
+                           {"wallet_id": holder_wallet, "vendor_id": vendor_id,
+                            "public_key_hex": holder_pk,
                             "resource_id": "doc-001", "action": "read",
                             "scopes": ["document:read"]})
             if cs not in (200, 201):
@@ -1044,29 +1050,30 @@ def attack_i11_max_uses_exhaustion(
                 results.append((cs, cb))
                 continue
 
+            ch = cb.get("challenge", cb)  # nested under "challenge" key
             transcript_hex = _run_helper(
                 helper, "canonical-request",
                 stdin=json.dumps({
-                    "suite_id":   cb.get("suite_id", 1),
+                    "suite_id":   ch.get("suite_id", 1),
                     "rp_id":      vendor_id,
-                    "rp_origin":  f"https://{vendor_id}.example",
-                    "challenge_id": cb["challenge_id"],
-                    "nonce":        cb["nonce"],
-                    "issued_at":    cb.get("issued_at", now_ts),
-                    "expires_at":   cb.get("expires_at", exp_ts),
+                    "rp_origin":  ch.get("rp_origin", f"https://{vendor_id}.example"),
+                    "challenge_id": ch["challenge_id"],
+                    "nonce":        ch["nonce"],
+                    "issued_at":    ch.get("issued_at", now_ts),
+                    "expires_at":   ch.get("expires_at", exp_ts),
                     "resource_id":  "doc-001",
                     "action":       "read",
                     "scopes":       ["document:read"],
-                    "policy_id":    cb.get("policy_id", "v1"),
+                    "policy_id":    ch.get("policy_id", "v1"),
                 }),
             )["transcript_hex"]
             agent_sig = _run_helper(helper, "sign-transcript",
                                     "--sk", agent["secret_key_hex"],
                                     "--transcript", transcript_hex)
             vs, vb = _post(client, f"{vendor_url}{DIS_VENDOR_VERIFY_DELEGATED}", {
-                "wallet_id":          "i11-agent",
+                "wallet_id":          holder_wallet,
                 "vendor_id":          vendor_id,
-                "challenge":          cb,
+                "challenge":          ch,
                 "delegation_chain":   [delegation_link],
                 "agent_public_key_hex": agent_pk,
                 "agent_signature_hex":  agent_sig["signature_hex"],
