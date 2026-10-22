@@ -38,7 +38,10 @@ _AGENT_SCRIPTS = {
     8: "agent8_identity_pilot.py",    # Phase A–D attestation-guard / identity pilot
 }
 
-_DEFAULT_ORDER = [5, 7, 8, 2, 3, 1, 4, 8]   # 6 runs separately via --propose-patches; 8=identity pilot
+_DEFAULT_ORDER = [5, 7, 8, 2, 3, 1, 4]   # 6 runs separately via --propose-patches
+
+# Agents that accept --once (InvariantMonitor only)
+_ONCE_AGENTS = {5}
 
 
 def _run_agent(
@@ -48,11 +51,13 @@ def _run_agent(
     extra_args: list[str],
 ) -> int:
     script = AGENTS_DIR / _AGENT_SCRIPTS[agent_num]
+    # --once is only understood by agent5 (InvariantMonitor)
+    filtered_args = [a for a in extra_args if a != "--once" or agent_num in _ONCE_AGENTS]
     cmd = [
         sys.executable, str(script),
         "--config",       str(config),
         "--findings-dir", str(findings_dir),
-    ] + extra_args
+    ] + filtered_args
     print(f"\n{'='*60}")
     print(f"Running Agent {agent_num}: {script.name}")
     print(f"  cmd: {' '.join(cmd)}")
