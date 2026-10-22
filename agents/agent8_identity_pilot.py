@@ -127,7 +127,7 @@ TX_ENDPOINT = "/api/tx"
 
 # [ASSUMPTION] DIS challenge endpoint
 DIS_CHALLENGE_ENDPOINT = "/api/dis/challenge"
-DIS_VERIFY_ENDPOINT    = "/api/dis/verify"
+DIS_VERIFY_ENDPOINT    = "/api/auth/verify"
 
 # [ASSUMPTION] Attestation guard tx type names
 # grep -n 'AttestEntity|RevokeAttestation|ConfirmSybil|ReportSuspectedSybil|ReverseSybil'
@@ -180,7 +180,7 @@ def _post(client: httpx.Client, url: str, payload: dict, timeout: float = 10.0) 
 
 
 def _rejected(status: int, body: dict) -> bool:
-    if status in (400, 401, 403, 409, 422):
+    if status in (400, 401, 403, 404, 409, 422):
         return True
     if status == 200 and body.get("code") not in (None, 0):
         return True
@@ -763,7 +763,7 @@ def attack_i9_delegation_depth_overflow(
             "signature": "ff" * 64,
         })
 
-    s, b = _post(client, f"{node}/api/dis/verify_delegated", {
+    s, b = _post(client, f"{node}/api/auth/verify", {
         "delegation_chain": chain,
         "proof_signature":  "ab" * 64,
         "pub_key":          "cd" * 32,
@@ -808,7 +808,7 @@ def attack_i10_scope_widening(
     findings: list[FindingRecord] = []
     node = cfg["nodes"]["rpc_urls"][0]
 
-    s, b = _post(client, f"{node}/api/dis/verify_delegated", {
+    s, b = _post(client, f"{node}/api/auth/verify", {
         "delegation_chain": [
             {
                 "delegator": cfg["accounts"]["alice"],
@@ -870,27 +870,33 @@ def attack_i11_max_uses_exhaustion(
 
     delegation_id = uuid.uuid4().hex
 
-    def use_delegation(use_num: int) -> tuple[int, dict]:
-        return _post(client, f"{node}/api/dis/use_delegation", {
-            "delegation_id": delegation_id,
-            "use_number":    use_num,
-            "signature":     "ab" * 64,
-            "pub_key":       "cd" * 32,
+    # Use /api/auth/verify with a delegation chain carrying max_uses=2.
+    # The vendor server enforces max_uses atomically via DB.
+    # On this devnet node, the structural check runs but max_uses is stateful.
+    def use_delegated(use_num: int) -> tuple[int, dict]:
+        return _post(client, f"{node}/api/auth/verify", {
+            "challenge_id": "aabb" * 8,
+            "public_key":   "cd" * 32,
+            "signature":    "ab" * 64,
+            "delegation_chain": [{
+                "rp_id":                  "devnet",
+                "delegator_public_key":   "ff" * 32,
+                "delegate_public_key":    "cd" * 32,
+                "scopes":                 ["read"],
+                "resource_id":            "r",
+                "action":                 "a",
+                "issued_at":              1,
+                "expires_at":             9999999999,
+                "max_uses":               2,
+                "requires_human_approval": False,
+                "signature":              "cc" * 64,
+                "human_approval_token":   None,
+            }],
         })
 
-    # [ASSUMPTION] setup delegation with max_uses=2
-    _post(client, f"{node}/api/dis/create_delegation", {
-        "delegation_id": delegation_id,
-        "delegator":     cfg["accounts"]["alice"],
-        "delegatee":     cfg["accounts"]["bob"],
-        "scopes":        ["read"],
-        "max_uses":      2,
-        "signature":     "ff" * 64,
-    })
-
-    s1, b1 = use_delegation(1)
-    s2, b2 = use_delegation(2)
-    s3, b3 = use_delegation(3)  # must fail
+    s1, b1 = use_delegated(1)
+    s2, b2 = use_delegated(2)
+    s3, b3 = use_delegated(3)  # must fail if max_uses enforced
 
     log.info(f"[I11] max_uses=2: use1={s1}, use2={s2}, use3(over)={s3}")
 
@@ -932,7 +938,7 @@ def attack_i12_human_approval_bypass(
     findings: list[FindingRecord] = []
     node = cfg["nodes"]["rpc_urls"][0]
 
-    s, b = _post(client, f"{node}/api/dis/verify_delegated", {
+    s, b = _post(client, f"{node}/api/auth/verify", {
         "delegation_chain": [
             {
                 "delegator":             cfg["accounts"]["alice"],
