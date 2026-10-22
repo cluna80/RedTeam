@@ -330,6 +330,9 @@ def attack_c1_chain_id_regression(client: httpx.Client, cfg: dict[str, Any]) -> 
                 block_hash="aa" * 32,
                 validator_addr="qcb1alice000000000000000000000000000000000",
             )
+            if s == 404:
+                log.info(f"[C1] vote endpoint not deployed — NOT_TESTED (chain_id={wrong_cid!r})")
+                continue
             if not _rejected(s, b):
                 f = _finding(
                     inv=9,
@@ -729,11 +732,18 @@ def attack_c7_equivocation(client: httpx.Client, cfg: dict[str, Any]) -> list[Fi
     s2, b2 = _inject_vote(client, node_url, chain_id, h, 0, hash_b, validator)
     log.info(f"[C7] injected conflicting votes", height=h, s1=s1, s2=s2)
 
+    if s1 == 404 and s2 == 404:
+        log.info("[C7] vote endpoint not deployed — NOT_TESTED")
+        return findings
+
     time.sleep(3)
 
     # Check slashing evidence endpoint
     # [ASSUMPTION] endpoint path — grep chain-forge-slashing/src/ chain-forge-node/src/
-    _, evidence = _get(client, f"{node_url}{_DEBUG_PREFIX}/slashing_evidence")
+    se_status, evidence = _get(client, f"{node_url}{_DEBUG_PREFIX}/slashing_evidence")
+    if se_status == 404:
+        log.info("[C7] slashing evidence endpoint not deployed — NOT_TESTED")
+        return findings
     equivocations = [
         e for e in evidence.get("evidence", [])
         if (

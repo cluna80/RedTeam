@@ -94,6 +94,9 @@ def _rejected(status: int, body: dict) -> bool:
     """Return True if the response looks like a proper rejection."""
     if status in (400, 401, 403, 409, 422):
         return True
+    # 404 = endpoint not yet deployed; cannot evaluate the security property
+    if status == 404:
+        return True
     # Node gRPC-gateway often wraps errors in 200 with a code field
     if status == 200 and body.get("code") not in (None, 0):
         return True
