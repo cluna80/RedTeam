@@ -974,12 +974,15 @@ def attack_i11_max_uses_exhaustion(
         holder_pk = holder["public_key_hex"]
         holder_sk = holder["secret_key_hex"]
         agent_pk  = agent["public_key_hex"]
+        run_id = int(time.time())
+        holder_wallet_id = f"i11-holder-{run_id}"
 
         # ------------------------------------------------------------------ #
         # 2. Enroll the holder on the DIS vendor server                       #
+        # (challenge + verify + enroll; wallet_id owns the root delegator key)#
         # ------------------------------------------------------------------ #
         _, ec = _post(client, f"{vendor_url}/enroll/challenge",
-                      {"wallet_id": "i11-holder", "vendor_id": vendor_id,
+                      {"wallet_id": holder_wallet_id, "vendor_id": vendor_id,
                        "public_key_hex": holder_pk})
         nonce_str: str
         if isinstance(ec.get("nonce"), list):
@@ -989,7 +992,7 @@ def attack_i11_max_uses_exhaustion(
         enroll_sig = _run_helper(helper, "sign-nonce", "--sk", holder_sk,
                                  "--nonce", nonce_str)
         es, eb = _post(client, f"{vendor_url}/enroll",
-                       {"wallet_id": "i11-holder", "vendor_id": vendor_id,
+                       {"wallet_id": holder_wallet_id, "vendor_id": vendor_id,
                         "public_key_hex": holder_pk,
                         "signature_hex": enroll_sig["signature_hex"]})
         if es not in (200, 201):
@@ -1032,11 +1035,15 @@ def attack_i11_max_uses_exhaustion(
 
         # ------------------------------------------------------------------ #
         # 4. Three verify_delegated calls, fresh challenge each time           #
+        #                                                                      #
+        # The challenge MUST be requested for the holder's wallet_id because   #
+        # verify_delegated_inner checks:                                        #
+        #   challenge.wallet_id == req.wallet_id == enrolled wallet of root    #
+        # The agent's key + signature are separate fields in the request.      #
         # ------------------------------------------------------------------ #
         for use_num in range(1, 4):
             cs, cb = _post(client, f"{vendor_url}/challenge",
-                           {"wallet_id": "i11-agent", "vendor_id": vendor_id,
-                            "public_key_hex": agent_pk,
+                           {"wallet_id": holder_wallet_id, "vendor_id": vendor_id,
                             "resource_id": "doc-001", "action": "read",
                             "scopes": ["document:read"]})
             if cs not in (200, 201):
@@ -1064,7 +1071,7 @@ def attack_i11_max_uses_exhaustion(
                                     "--sk", agent["secret_key_hex"],
                                     "--transcript", transcript_hex)
             vs, vb = _post(client, f"{vendor_url}{DIS_VENDOR_VERIFY_DELEGATED}", {
-                "wallet_id":          "i11-agent",
+                "wallet_id":          holder_wallet_id,
                 "vendor_id":          vendor_id,
                 "challenge":          cb,
                 "delegation_chain":   [delegation_link],
