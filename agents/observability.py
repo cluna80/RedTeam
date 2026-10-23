@@ -196,6 +196,7 @@ def _render_dashboard(findings: list[FindingRecord]) -> None:
         "agent5_invariant":      "Agent 5  InvariantMonitor",
         "agent6_patch":          "Agent 6  PatchProposer",
         "agent_identity_pilot":  "Agent 8  IdentityPilot",
+        "agent9_qpc_consensus":  "Agent 9  QpcConsensusAdversary",
     }
 
     for agent_id, afindings in sorted(by_agent.items()):
