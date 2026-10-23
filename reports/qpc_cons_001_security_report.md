@@ -1,7 +1,7 @@
 # QPC-CONS-001 Security Report
 
-**Generated:** 2026-10-23T10:53:57.397531+00:00  
-**Commit:** `afd3891`  
+**Generated:** 2026-10-23T10:54:36.686732+00:00  
+**Commit:** `197ea07`  
 **Chain ID:** `localnet-unsafe-override`  
 **Devnet reachable:** False
 
@@ -37,16 +37,16 @@ into the live validator admission flow.
 
 | Test ID | Classification | Notes |
 |---|---|---|
-| QPC-A01 | NOT_TESTED | offline mode |
-| QPC-A02 | NOT_TESTED | offline mode |
-| QPC-A03 | NOT_TESTED | offline mode |
-| QPC-A04 | NOT_TESTED | offline mode |
-| QPC-A05 | NOT_TESTED | offline mode |
-| QPC-A06 | NOT_TESTED | offline mode |
-| QPC-A07 | NOT_TESTED | offline mode |
-| QPC-A08 | NOT_TESTED | offline mode |
-| QPC-A09 | NOT_TESTED | offline mode |
-| QPC-A10 | NOT_TESTED | offline mode |
+| QPC-A01 | NOT_TESTED | devnet unreachable |
+| QPC-A02 | NOT_TESTED | devnet unreachable |
+| QPC-A03 | NOT_TESTED | devnet unreachable |
+| QPC-A04 | NOT_TESTED | devnet unreachable |
+| QPC-A05 | NOT_TESTED | devnet unreachable |
+| QPC-A06 | NOT_TESTED | devnet unreachable |
+| QPC-A07 | NOT_TESTED | devnet unreachable |
+| QPC-A08 | NOT_TESTED | devnet unreachable |
+| QPC-A09 | NOT_TESTED | devnet unreachable |
+| QPC-A10 | NOT_TESTED | devnet unreachable |
 
 ## Conclusion
 

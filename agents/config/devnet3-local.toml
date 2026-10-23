@@ -47,8 +47,7 @@ gossip_replay_window   = 120
 max_flood_msgs       = 500
 max_sybil_identities = 20
 
-# DIS vendor server — separate service from the blockchain nodes.
-# Start with: cargo run -p dis-vendor-server (default port 3000)
+# DIS vendor endpoint is served by the chain-forge-node itself (port 8080).
 [dis]
-vendor_url = "http://127.0.0.1:3000"
+vendor_url = "http://127.0.0.1:8080"
 vendor_id  = "devnet"
