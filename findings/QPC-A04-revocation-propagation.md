@@ -1,9 +1,10 @@
 # QPC-A04: Revocation Propagation — Phase A Gap
 
 **ID**: QPC-A04  
-**Severity**: MEDIUM (Phase A documented gap; becomes HIGH when Phase C is not implemented before mainnet)  
-**Status**: OPEN — Phase C not yet implemented  
+**Severity**: MEDIUM (was; now resolved)  
+**Status**: CLOSED — Phase C implemented in commit 17ab814  
 **Discovered**: 2026-10-23 via Agent 9 live devnet run (commit 890b060)  
+**Fixed**: 2026-10-23 (commit 17ab814, branch `feat/qpc-cons-001-phase-b-authenticated-binding`)  
 **Component**: `chain-forge-identity` + `chain-forge-execution`
 
 ---
@@ -91,9 +92,20 @@ Agent 9 test QPC-A04 automates this sequence and emits `FINDING` on detection.
 
 ---
 
-## Remediation
+## Fix (commit 17ab814)
 
-**Phase C implementation required** before mainnet:
+The following was implemented in `chain-forge-identity` and `chain-forge-execution`:
+
+- `IntrinsicCharm.verified_via_wot: bool` — set by WoT quorum path, cleared by PoP path.
+- `IntrinsicCharm::verify_wot()` — called by `attest()` on quorum; sets the flag.
+- `IntrinsicCharm::downgrade_to_provisional()` — resets tier, epoch, and the flag.
+- `revoke_attestation()` — after ledger removal, if count < quorum AND verified_via_wot, calls downgrade; returns `tier_downgraded: bool` in `RevocationCost`.
+- Executor `RevokeAttestation` handler — when `tier_downgraded`, syncs charm to account state and calls `state.refresh_leaf()`.
+- 5 identity unit tests + 1 executor integration test added.
+
+## Remediation (historical — for reference)
+
+**Phase C implementation was required** before mainnet:
 
 1. After `revoke_attestation()` removes an attester from the ledger, check if
    `attestation_ledger.count() < ATTESTATION_QUORUM`.
