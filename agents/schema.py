@@ -28,6 +28,7 @@ class AgentId(str, Enum):
     INVARIANT       = "agent5_invariant"
     PATCH_PROPOSER  = "agent6_patch"
     IDENTITY_PILOT  = "agent_identity_pilot"   # Phase A–D attestation-guard tests
+    QPC_CONSENSUS   = "agent9_qpc_consensus"   # QPC-CONS-001 personhood-weighted consensus adversary
 
 
 @dataclass

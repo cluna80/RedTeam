@@ -36,9 +36,10 @@ _AGENT_SCRIPTS = {
     7: "agent7_consensus.py",
     6: "agent6_patch.py",
     8: "agent8_identity_pilot.py",    # Phase A–D attestation-guard / identity pilot
+    9: "agent9_qpc_consensus.py",    # QPC-CONS-001 personhood-weighted consensus adversary
 }
 
-_DEFAULT_ORDER = [5, 7, 8, 2, 3, 1, 4]   # 6 runs separately via --propose-patches
+_DEFAULT_ORDER = [5, 7, 8, 9, 2, 3, 1, 4]   # 6 runs separately via --propose-patches
 
 # Agents that accept --once (InvariantMonitor only)
 _ONCE_AGENTS = {5}
