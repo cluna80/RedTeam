@@ -1,15 +1,15 @@
 {
   "milestone": "QPC-CONS-001",
-  "timestamp": "2026-10-23T10:54:36.685728+00:00",
-  "git_sha": "197ea07",
+  "timestamp": "2026-10-23T10:59:52.367417+00:00",
+  "git_sha": "e7fbd5a",
   "chain_id": "localnet-unsafe-override",
   "devnet_up": false,
   "test_results": [
     {
       "test_id": "QPC-A01",
       "scenario": "One human registers 10 validators",
-      "timestamp": "2026-10-23T10:54:36.685638+00:00",
-      "git_sha": "197ea07",
+      "timestamp": "2026-10-23T10:59:52.367360+00:00",
+      "git_sha": "e7fbd5a",
       "chain_id": "localnet-unsafe-override",
       "seed": 1370210305,
       "validator_count": 0,
@@ -27,8 +27,8 @@
     {
       "test_id": "QPC-A02",
       "scenario": "Split stake across 100 wallets",
-      "timestamp": "2026-10-23T10:54:36.685653+00:00",
-      "git_sha": "197ea07",
+      "timestamp": "2026-10-23T10:59:52.367376+00:00",
+      "git_sha": "e7fbd5a",
       "chain_id": "localnet-unsafe-override",
       "seed": 1370210305,
       "validator_count": 0,
@@ -46,8 +46,8 @@
     {
       "test_id": "QPC-A03",
       "scenario": "Credential reuse across validators",
-      "timestamp": "2026-10-23T10:54:36.685660+00:00",
-      "git_sha": "197ea07",
+      "timestamp": "2026-10-23T10:59:52.367382+00:00",
+      "git_sha": "e7fbd5a",
       "chain_id": "localnet-unsafe-override",
       "seed": 1370210305,
       "validator_count": 0,
@@ -65,8 +65,8 @@
     {
       "test_id": "QPC-A04",
       "scenario": "Revoked credential voting",
-      "timestamp": "2026-10-23T10:54:36.685665+00:00",
-      "git_sha": "197ea07",
+      "timestamp": "2026-10-23T10:59:52.367386+00:00",
+      "git_sha": "e7fbd5a",
       "chain_id": "localnet-unsafe-override",
       "seed": 1370210305,
       "validator_count": 0,
@@ -84,8 +84,8 @@
     {
       "test_id": "QPC-A05",
       "scenario": "Credential recovery dual binding",
-      "timestamp": "2026-10-23T10:54:36.685669+00:00",
-      "git_sha": "197ea07",
+      "timestamp": "2026-10-23T10:59:52.367390+00:00",
+      "git_sha": "e7fbd5a",
       "chain_id": "localnet-unsafe-override",
       "seed": 1370210305,
       "validator_count": 0,
@@ -103,8 +103,8 @@
     {
       "test_id": "QPC-A06",
       "scenario": "Personhood proof replay",
-      "timestamp": "2026-10-23T10:54:36.685674+00:00",
-      "git_sha": "197ea07",
+      "timestamp": "2026-10-23T10:59:52.367394+00:00",
+      "git_sha": "e7fbd5a",
       "chain_id": "localnet-unsafe-override",
       "seed": 1370210305,
       "validator_count": 0,
@@ -122,8 +122,8 @@
     {
       "test_id": "QPC-A07",
       "scenario": "Cross-node validator consistency",
-      "timestamp": "2026-10-23T10:54:36.685678+00:00",
-      "git_sha": "197ea07",
+      "timestamp": "2026-10-23T10:59:52.367397+00:00",
+      "git_sha": "e7fbd5a",
       "chain_id": "localnet-unsafe-override",
       "seed": 1370210305,
       "validator_count": 0,
@@ -141,8 +141,8 @@
     {
       "test_id": "QPC-A08",
       "scenario": "Transition consistency",
-      "timestamp": "2026-10-23T10:54:36.685682+00:00",
-      "git_sha": "197ea07",
+      "timestamp": "2026-10-23T10:59:52.367406+00:00",
+      "git_sha": "e7fbd5a",
       "chain_id": "localnet-unsafe-override",
       "seed": 1370210305,
       "validator_count": 0,
@@ -160,8 +160,8 @@
     {
       "test_id": "QPC-A09",
       "scenario": "Restart after revocation",
-      "timestamp": "2026-10-23T10:54:36.685714+00:00",
-      "git_sha": "197ea07",
+      "timestamp": "2026-10-23T10:59:52.367409+00:00",
+      "git_sha": "e7fbd5a",
       "chain_id": "localnet-unsafe-override",
       "seed": 1370210305,
       "validator_count": 0,
@@ -179,8 +179,8 @@
     {
       "test_id": "QPC-A10",
       "scenario": "Attacker controls many validators",
-      "timestamp": "2026-10-23T10:54:36.685722+00:00",
-      "git_sha": "197ea07",
+      "timestamp": "2026-10-23T10:59:52.367412+00:00",
+      "git_sha": "e7fbd5a",
       "chain_id": "localnet-unsafe-override",
       "seed": 1370210305,
       "validator_count": 0,
@@ -216,15 +216,15 @@
       "evidence": {
         "rust_gap_location": "chain-forge-execution/src/lib.rs:2112-2123 (BondValidator handler)",
         "cap_enforcement_location": "chain-forge-validators/src/lib.rs:992-1035 (build_validator_set)",
-        "git_sha": "197ea07",
+        "git_sha": "e7fbd5a",
         "affected_tests": [
           "QPC-A01",
           "QPC-A03",
           "QPC-A10"
         ]
       },
-      "timestamp": "2026-10-23T10:54:36.684950+00:00",
-      "finding_id": "e4aef64f-5a55-45d5-963f-257f7363d377",
+      "timestamp": "2026-10-23T10:59:52.366772+00:00",
+      "finding_id": "c23f6192-cc83-4bb4-905c-ebd81ff64bc7",
       "regression_path": null
     },
     {
@@ -245,15 +245,15 @@
         "coordinator_config": "tests/devnet/genesis-3node.json:attestation_coordinator=qcb1alice",
         "gate_location": "chain-forge-consensus/src/lib.rs:614 (gate_voting_power)",
         "zk_vrc_location": "chain-forge-personhood/src/lib.rs (Groth16VrcVerifier)",
-        "git_sha": "197ea07",
+        "git_sha": "e7fbd5a",
         "affected_tests": [
           "QPC-A02",
           "QPC-A05"
         ],
         "whitepaper_reference": "Section 4 \u2014 Identity Pilot centralization note"
       },
-      "timestamp": "2026-10-23T10:54:36.684998+00:00",
-      "finding_id": "9ae3a5af-6b68-41e6-a706-87611864f4db",
+      "timestamp": "2026-10-23T10:59:52.366817+00:00",
+      "finding_id": "5234eda8-d777-40c4-a88d-5d9bd6a50c71",
       "regression_path": null
     }
   ]

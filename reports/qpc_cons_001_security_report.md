@@ -1,7 +1,7 @@
 # QPC-CONS-001 Security Report
 
-**Generated:** 2026-10-23T10:54:36.686732+00:00  
-**Commit:** `197ea07`  
+**Generated:** 2026-10-23T10:59:52.368445+00:00  
+**Commit:** `e7fbd5a`  
 **Chain ID:** `localnet-unsafe-override`  
 **Devnet reachable:** False
 
